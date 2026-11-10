@@ -1,0 +1,7 @@
+/output/
+/logs/
+/coverage.out
+/conf/server/config.local.toml
+/data/
+.env
+.DS_Store

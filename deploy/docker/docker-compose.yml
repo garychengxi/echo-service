@@ -1,0 +1,17 @@
+services:
+  echo-service:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: ${ECHO_SERVICE_IMAGE:-echo-service:amd64}
+    restart: unless-stopped
+    environment:
+      ECHO_HTTPSERVER_LISTEN: ${ECHO_HTTP_LISTEN:-0.0.0.0:9090}
+      ECHO_DB_PATH: ${ECHO_DB_PATH:-/app/data/echo-service.db}
+    ports:
+      - "${ECHO_SERVICE_PORT:-9090}:9090"
+    volumes:
+      - type: bind
+        source: ${ECHO_DATA_DIR:-./data}
+        target: /app/data
+

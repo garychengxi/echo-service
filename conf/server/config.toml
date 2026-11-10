@@ -1,0 +1,40 @@
+AppName = "echoservice"
+AppCode = 100
+RunMode = "release"
+ShutdownTimeout = "10s"
+
+[HTTPServer]
+Listen = "127.0.0.1:9090"
+ReadTimeout = 60000
+WriteTimeout = 60000
+IdleTimeout = 60000
+MaxHeaderBytes = 1048576
+APIBasePath = ""
+AuthType = "Fake" # Framework adapter only; /api/v1 uses Echo token middleware.
+IdempotenceEnable = false
+PprofEnable = false
+SwaggerEnable = false
+ConsoleEnable = false
+AltoHandlerAPIError = false
+UseH2C = false
+
+[DB]
+Path = "data/echo-service.db"
+BusyTimeout = "5s"
+MaxOpenConns = 1
+
+[Cache]
+Provider = "memory"
+TTL = "5m"
+CleanupInterval = "1m"
+
+[Auth]
+AccessTokenTTL = "30m"
+RefreshTokenTTL = "168h"
+Issuer = "echo-service"
+
+[AgentConnection]
+DialTimeout = "5s"
+RequestTimeout = "30s"
+WriteQueueSize = 256
+MaxMessageBytes = 8388608

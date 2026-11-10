@@ -1,0 +1,25 @@
+# Echo Service Docker
+
+Copy `.env.example` to `.env`, set `ECHO_DATA_DIR` to the host directory that
+already contains (or will contain) `echo-service.db`, then run:
+
+```sh
+mkdir -p data
+docker compose --env-file .env up -d --build
+```
+
+For an exported image, run `docker load -i echo-service-image.tar.gz` first,
+then use `docker compose --env-file .env up -d --no-build`.
+The exported image must match the deployment host's CPU architecture;
+check with `docker image inspect echo-service:amd64 --format '{{.Architecture}}'`.
+
+The source package includes vendored Go dependencies, so image builds do not
+need access to the private Go module server.
+
+The SQLite database is `/app/data/echo-service.db` inside the container and is
+persisted in the host directory configured by `ECHO_DATA_DIR`. Mount the whole
+database directory, including SQLite sidecar files, rather than mounting only
+the `.db` file. The directory must be writable by container UID `10001`; for
+example, `chown -R 10001:10001 /path/to/echo-data`. Keep a backup before moving
+an existing database. The image listens on `0.0.0.0:9090` and is intended to sit
+behind the Web gateway or another authenticated reverse proxy.

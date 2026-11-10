@@ -1,0 +1,6 @@
+.git
+data
+output
+*.db
+*.sqlite
+*.log
