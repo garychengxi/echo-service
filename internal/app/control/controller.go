@@ -167,13 +167,8 @@ func (s *Service) refresh(c *gin.Context) {
 		lib.Error(c, 429, "RateLimited", "Try again later")
 		return
 	}
-	tokens, userID, e := s.Auth.Refresh(c.Request.Context(), req.RefreshToken)
+	tokens, _, e := s.Auth.Refresh(c.Request.Context(), req.RefreshToken)
 	if e != nil {
-		if userID != "" {
-			s.access.Lock()
-			s.invalidate(userID, "")
-			s.access.Unlock()
-		}
 		if errors.Is(e, auth.ErrToken) || errors.Is(e, auth.ErrReplay) {
 			lib.Error(c, 401, "InvalidToken", "Refresh token is invalid or revoked")
 		} else {
@@ -181,11 +176,8 @@ func (s *Service) refresh(c *gin.Context) {
 		}
 		return
 	}
-	if userID != "" {
-		s.access.Lock()
-		s.invalidate(userID, "")
-		s.access.Unlock()
-	}
+	// Each socket rechecks its own access token; rotating one login must not
+	// close the user-scoped upstream connection or other devices.
 	lib.OK(c, tokens)
 }
 func (s *Service) logout(all bool) gin.HandlerFunc {
@@ -197,7 +189,9 @@ func (s *Service) logout(all bool) gin.HandlerFunc {
 			failed(c, e)
 			return
 		}
-		s.invalidate(p.UserID, "")
+		if all {
+			s.invalidate(p.UserID, "")
+		}
 		c.Status(204)
 	}
 }

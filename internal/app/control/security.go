@@ -32,9 +32,7 @@ func (s *Service) revokeAuthSession(c *gin.Context) {
 		failed(c, err)
 		return
 	}
-	// Upstream connections are user-scoped, so conservatively close this user's
-	// transport; still-valid devices can explicitly reconnect and load.
-	s.invalidate(p.UserID, "")
+	// Sockets recheck the specific login session; keep other devices connected.
 	c.Status(204)
 }
 

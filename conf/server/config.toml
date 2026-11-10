@@ -29,9 +29,10 @@ TTL = "5m"
 CleanupInterval = "1m"
 
 [Auth]
-AccessTokenTTL = "30m"
+AccessTokenTTL = "24h"
 RefreshTokenTTL = "168h"
 Issuer = "echo-service"
+SingleSession = false
 
 [AgentConnection]
 DialTimeout = "5s"

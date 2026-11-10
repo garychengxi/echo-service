@@ -127,6 +127,11 @@ func (s *Service) Login(ctx context.Context, username, password, device string) 
 		if err := tx.First(&current, "id = ? AND password_hash = ? AND status = ?", u.ID, u.PasswordHash, "active").Error; err != nil {
 			return ErrCredentials
 		}
+		if s.config.SingleSession {
+			if err := tx.Model(&table.AuthSession{}).Where("user_id = ? AND revoked_at IS NULL", u.ID).Update("revoked_at", time.Now().UnixMilli()).Error; err != nil {
+				return err
+			}
+		}
 		session := table.AuthSession{ID: uuid.NewString(), UserID: u.ID, DeviceName: device, ExpiresAt: time.Now().Add(s.config.RefreshTokenTTL).UnixMilli()}
 		if err := tx.Create(&session).Error; err != nil {
 			return err

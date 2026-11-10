@@ -26,6 +26,7 @@ type Session struct {
 	Title        string  `json:"title"`
 	Cwd          string  `json:"cwd"`
 	ModelID      string  `json:"modelId"`
+	ModeID       string  `json:"modeId"`
 	CreatedAt    int64   `gorm:"autoCreateTime:milli" json:"createdAt"`
 }
 
@@ -93,6 +94,9 @@ func MigrateRuntime(db *gorm.DB) error {
 			}
 		}
 		if err := tx.Exec("ALTER TABLE containers ADD COLUMN web_url TEXT NOT NULL DEFAULT ''").Error; err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+		if err := tx.Exec("ALTER TABLE sessions ADD COLUMN mode_id TEXT NOT NULL DEFAULT 'always-ask'").Error; err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return err
 		}
 		return nil

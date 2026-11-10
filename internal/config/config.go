@@ -32,6 +32,7 @@ type Auth struct {
 	AccessTokenTTL  time.Duration
 	RefreshTokenTTL time.Duration
 	Issuer          string
+	SingleSession   bool
 }
 type AgentConnection struct {
 	DialTimeout     time.Duration
@@ -43,7 +44,7 @@ type AgentConnection struct {
 func Load(v *viper.Viper) (*Config, error) {
 	v.SetEnvPrefix("ECHO")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	for _, key := range []string{"HTTPServer.Listen", "DB.Path", "DB.BusyTimeout", "DB.MaxOpenConns", "Cache.Provider", "Cache.TTL", "Cache.CleanupInterval", "Auth.AccessTokenTTL", "Auth.RefreshTokenTTL", "Auth.Issuer", "AgentConnection.DialTimeout", "AgentConnection.RequestTimeout", "AgentConnection.WriteQueueSize", "AgentConnection.MaxMessageBytes", "ShutdownTimeout"} {
+	for _, key := range []string{"HTTPServer.Listen", "DB.Path", "DB.BusyTimeout", "DB.MaxOpenConns", "Cache.Provider", "Cache.TTL", "Cache.CleanupInterval", "Auth.AccessTokenTTL", "Auth.RefreshTokenTTL", "Auth.Issuer", "Auth.SingleSession", "AgentConnection.DialTimeout", "AgentConnection.RequestTimeout", "AgentConnection.WriteQueueSize", "AgentConnection.MaxMessageBytes", "ShutdownTimeout"} {
 		if err := v.BindEnv(key); err != nil {
 			return nil, err
 		}
@@ -56,6 +57,13 @@ func Load(v *viper.Viper) (*Config, error) {
 	c.Database.MaxOpenConns = integer(v, "DB.MaxOpenConns", 1)
 	c.Cache.Provider = value(v, "Cache.Provider", "memory")
 	c.Auth.Issuer = value(v, "Auth.Issuer", "echo-service")
+	if v.IsSet("Auth.SingleSession") {
+		single, err := strconv.ParseBool(v.GetString("Auth.SingleSession"))
+		if err != nil {
+			return nil, fmt.Errorf("Auth.SingleSession must be a boolean")
+		}
+		c.Auth.SingleSession = single
+	}
 	c.AgentConnection.WriteQueueSize = integer(v, "AgentConnection.WriteQueueSize", 256)
 	c.AgentConnection.MaxMessageBytes = int64(integer(v, "AgentConnection.MaxMessageBytes", 8<<20))
 	for _, item := range []struct {
@@ -64,7 +72,7 @@ func Load(v *viper.Viper) (*Config, error) {
 	}{
 		{"ShutdownTimeout", "10s", &c.ShutdownTimeout}, {"DB.BusyTimeout", "5s", &c.Database.BusyTimeout},
 		{"Cache.TTL", "5m", &c.Cache.TTL}, {"Cache.CleanupInterval", "1m", &c.Cache.CleanupInterval},
-		{"Auth.AccessTokenTTL", "30m", &c.Auth.AccessTokenTTL}, {"Auth.RefreshTokenTTL", "168h", &c.Auth.RefreshTokenTTL},
+		{"Auth.AccessTokenTTL", "24h", &c.Auth.AccessTokenTTL}, {"Auth.RefreshTokenTTL", "168h", &c.Auth.RefreshTokenTTL},
 		{"AgentConnection.DialTimeout", "5s", &c.AgentConnection.DialTimeout}, {"AgentConnection.RequestTimeout", "30s", &c.AgentConnection.RequestTimeout},
 	} {
 		d, err := time.ParseDuration(value(v, item.key, item.fallback))

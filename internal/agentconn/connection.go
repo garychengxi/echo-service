@@ -219,7 +219,7 @@ func (c *Connection) readLoop() {
 			}
 			continue
 		}
-		if len(msg.ID) > 0 && msg.Method != "session/request_permission" {
+		if len(msg.ID) > 0 && msg.Method != "session/request_permission" && msg.Method != "_codeflow/ask_user_question" && msg.Method != "codeflow/ask_user_question" {
 			b, _ := json.Marshal(Message{JSONRPC: "2.0", ID: msg.ID, Error: &RPCError{Code: -32601, Message: "Unsupported server request"}})
 			if c.enqueue(b) != nil {
 				return

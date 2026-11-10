@@ -7,6 +7,9 @@ services:
     restart: unless-stopped
     environment:
       ECHO_HTTPSERVER_LISTEN: ${ECHO_HTTP_LISTEN:-0.0.0.0:9090}
+      ECHO_AUTH_SINGLESESSION: ${ECHO_AUTH_SINGLESESSION:-false}
+      ECHO_AUTH_ACCESSTOKENTTL: ${ECHO_AUTH_ACCESSTOKENTTL:-24h}
+      ECHO_AUTH_REFRESHTOKENTTL: ${ECHO_AUTH_REFRESHTOKENTTL:-168h}
       ECHO_DB_PATH: ${ECHO_DB_PATH:-/app/data/echo-service.db}
     ports:
       - "${ECHO_SERVICE_PORT:-9090}:9090"

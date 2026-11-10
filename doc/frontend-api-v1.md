@@ -125,7 +125,7 @@ export interface Tokens {
   accessToken: string;
   refreshToken: string;
   tokenType: "Bearer";
-  expiresIn: number; // 秒，默认 access 有效期约 1800 秒，以服务配置/返回为准
+  expiresIn: number; // 秒，默认 access 有效期 86400 秒（24 小时），以服务配置/返回为准
 }
 export interface Container {
   id: string;
@@ -155,6 +155,7 @@ export interface Session {
   title: string;
   cwd: string;
   modelId: string;
+  modeId: "always-ask" | "llm-approve" | "always-approve";
   createdAt: number; // Unix 毫秒
 }
 export type TurnState =
@@ -192,6 +193,12 @@ export interface Connectivity {
 前端可用于菜单显示；资源级鉴权仍由服务端执行。
 
 ## 3. 登录与个人信息
+
+默认允许同一账号多端登录，独立登录会话的刷新/退出不会断开其他端。
+`ECHO_AUTH_SINGLESESSION=true` 可启用新登录撤销旧登录；默认 `false`。
+`ECHO_AUTH_ACCESSTOKENTTL=24h` 设置 access 有效期，
+`ECHO_AUTH_REFRESHTOKENTTL=168h` 设置登录会话/refresh 的绝对期限。
+已有 token 不追溯延长，重新登录或刷新后使用新 access TTL，且不超过原登录会话期限。
 
 ### 3.1 POST /auth/login
 
@@ -465,14 +472,14 @@ cwd 是容器进程的工作目录 URI，不等于当前 Session.cwd。
 
 ### 5.8 GET /containers/{containerId}/agent-settings
 
-成功 200：`{"mode":"llm-approve"}` 或 `{"mode":"always-ask"}`。
+成功 200：`{"mode":"llm-approve"}`, `{"mode":"always-ask"}` 或 `{"mode":"always-approve"}`。
 上游没有配置时映射为 llm-approve。只返回默认权限 mode，不返回 OAuth/模型密钥配置。
 
 ### 5.9 PATCH /containers/{containerId}/agent-settings
 
-请求 `{"mode":"always-ask"}` 或 `{"mode":"llm-approve"}`。
+请求 `{"mode":"always-ask"}`, `{"mode":"llm-approve"}` 或 `{"mode":"always-approve"}`。
 成功 200：`{mode:string}`。其他值 422。
-这是默认设置；网关新建/恢复 Session 时仍强制 always-ask。若要切换当前 Session，调用 Session mode 接口。
+这是新建 Session 时采用的安全默认值；网关创建 Session 时初始化为 always-ask。已有 Session 会恢复持久化的 mode；若要切换当前 Session，调用 Session mode 接口。
 
 ### 5.10 GET /containers/{containerId}/files
 
@@ -595,10 +602,9 @@ load 完成把 mode 强制设为 always-ask，客户端同步更新选择器。
 
 ### 7.9 PUT /sessions/{sessionId}/mode
 
-请求 `{"modeId":"always-ask"}` 或 `{"modeId":"llm-approve"}`。
+请求 `{"modeId":"always-ask"}`, `{"modeId":"llm-approve"}` 或 `{"modeId":"always-approve"}`。
 成功 200：`{sessionId,modeId}`；要求已 load 且无 active turn。
-always-approve 或其他 mode 返回 403 `PermissionDenied`，不要显示为可选项。
-mode 不包含在 Session GET 中，前端维护本次设置结果，并在 load 后重置为 always-ask。
+其他 mode 返回 403 `PermissionDenied`。当前 mode 随 Session 持久化；load 会恢复该值。
 
 ## 8. Turn 消息执行与审批
 
@@ -737,6 +743,12 @@ session.update 示例：
 payload 的扩展字段和更新类型以后可能增加。当前网关也会将可识别的 codeflow/x.ai 通知包装成
 session.update，并不承诺每个 payload 都有 update；未知类型应忽略/保留而非使整条连接报错。
 历史回放可能没有已关联 turnId，以外层 sessionId 定位；不能拿内层远端 ID 调 HTTP API。
+
+网关也接收 ACP 的 `_codeflow/session_notification` 子代理生命周期通知。
+子代理文字/推理通过 `session.update` 转发，外层 `sessionId` 仍是授权主会话 ID，
+`payload.childSessionId` 标识子代理时间线，和 `subagent_spawned` 中的
+`update.child_session_id` 对应。该 ID 只用于展示，不是独立 HTTP Session 资源。
+只转发同一上游连接中已由当前用户主会话声明的子代理；未知子会话事件被丢弃。
 
 审批示例：
 
@@ -928,3 +940,40 @@ remote container execution; this is independent of the CLI session category.
 Clients show the computer button for remote execution with a configured
 `webUrl`, and open the page in a workspace browser tab. No Service tokens are
 sent to that page. Frame permission and trusted HTTPS are deployment concerns.
+
+### Interactive client requests
+
+Permission approvals and `_codeflow/ask_user_question` use a shared, authenticated
+interaction lifecycle. ACP connections remain multiplexed; HTTP responses are short
+requests and never wait for user input.
+
+- `interaction.requested`: event with `sessionId`, `turnId` and payload
+  `{interactionId, kind: "permission" | "ask", params, expiresAt}`.
+  `params` contains ACP tool/options or questions/mode, without upstream session IDs.
+- `GET /containers/{containerId}/interactions`: `{items: [...]}` with the above
+  payload plus `sessionId` and `turnId`, for recovery after browser refresh.
+- `POST /turns/{turnId}/interactions/{interactionId}/response`:
+  `{response: <typed ACP response>}`; returns 204. Only the owning user and active
+  container assignment may answer. First valid response wins; stale/replayed
+  responses return 409; malformed responses return 422.
+- Permission response: `{outcome: {outcome: "selected", optionId}}` or
+  `{outcome: {outcome: "cancelled"}}`. The option must have been offered.
+- Ask response: `{outcome: "accepted", answers: {questionIdOrText: ["answer"]},
+  annotations?: {...}}`, `{outcome: "cancelled"}`, or the ACP
+  `chat_about_this` / `skip_interview` response with optional `partial_answers`.
+- `interaction.resolved`: `{interactionId, reason: "answered" | "expired"}`;
+  all logged-in clients clear the matching pending UI. Turn terminal events and
+  upstream disconnect also clear outstanding requests.
+
+Permission requests expire after 5 minutes; questions after 30 minutes (the overall
+turn deadline remains 30 minutes). Pending interactions live only for the original
+ACP connection. Service restart invalidates them and marks unfinished turns unknown.
+The existing approval endpoint and approval events remain compatible. Web clients
+should prefer interaction events and deduplicate legacy approval events by ID.
+Unrecognized upstream RPC requests remain unsupported; arbitrary RPC is not exposed.
+
+Session load during active work: reattaching the same loaded session returns 200
+without replaying history. Loading another session while a container has an active
+turn returns 409 `ContainerBusy`; answer or stop that task first. Interaction
+responses and cancellation bypass ordinary per-user command serialization so an
+unrelated slow request cannot prevent answering or stopping a task.

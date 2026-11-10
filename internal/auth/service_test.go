@@ -6,6 +6,7 @@ import (
 	"echo-service/internal/config"
 	"echo-service/internal/storage"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -126,5 +127,51 @@ func TestPasswordAndDisableRevoke(t *testing.T) {
 	}
 	if _, _, e = s.Login(ctx, "admin", "another-long-password", "test"); !errors.Is(e, ErrCredentials) {
 		t.Fatal("disabled login allowed")
+	}
+}
+
+func TestConcurrentLoginPolicy(t *testing.T) {
+	for _, single := range []bool{false, true} {
+		t.Run(fmt.Sprint(single), func(t *testing.T) {
+			s := testAuth(t)
+			s.config.SingleSession = single
+			s.config.AccessTokenTTL = 24 * time.Hour
+			s.config.RefreshTokenTTL = 7 * 24 * time.Hour
+			ctx := context.Background()
+			first, _, err := s.Login(ctx, "admin", "a-long-test-password", "device-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first.ExpiresIn != 86400 {
+				t.Fatal("expected 24 hour access token", first.ExpiresIn)
+			}
+			second, _, err := s.Login(ctx, "admin", "a-long-test-password", "device-b")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = s.Authenticate(ctx, first.AccessToken)
+			if single {
+				if !errors.Is(err, ErrToken) {
+					t.Fatal("old login remains active", err)
+				}
+				if _, _, err := s.Refresh(ctx, first.RefreshToken); !errors.Is(err, ErrToken) {
+					t.Fatal("old login refreshed", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal("second login kicked first", err)
+				}
+				if _, _, err := s.Refresh(ctx, first.RefreshToken); err != nil {
+					t.Fatal(err)
+				}
+			}
+			p, err := s.Authenticate(ctx, second.AccessToken)
+			if err != nil {
+				t.Fatal("other device affected", err)
+			}
+			if err := s.Logout(ctx, p, false); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

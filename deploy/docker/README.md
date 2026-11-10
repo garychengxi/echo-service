@@ -23,3 +23,18 @@ the `.db` file. The directory must be writable by container UID `10001`; for
 example, `chown -R 10001:10001 /path/to/echo-data`. Keep a backup before moving
 an existing database. The image listens on `0.0.0.0:9090` and is intended to sit
 behind the Web gateway or another authenticated reverse proxy.
+
+Authentication defaults in `.env`:
+
+```dotenv
+ECHO_AUTH_SINGLESESSION=false
+ECHO_AUTH_ACCESSTOKENTTL=24h
+ECHO_AUTH_REFRESHTOKENTTL=168h
+```
+
+Independent logins coexist by default. Set `ECHO_AUTH_SINGLESESSION=true` to
+revoke older logins on successful login. Refresh and single-device logout affect
+only that login's tokens and event sockets. Logout-all and account/assignment
+revocation still invalidate the relevant account connections. Existing tokens
+retain their original expiry; new/rotated access tokens use the configured TTL,
+capped by the login session's absolute refresh expiry.

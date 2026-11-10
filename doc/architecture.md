@@ -28,7 +28,10 @@ HTTP / WebSocket controller
 
 access/refresh 均为 256-bit 随机不透明 token，数据库只存 SHA-256。refresh 单次使用并旋转；
 重放撤销整个 auth session。每次 HTTP 请求查 token 表；前端事件发送前也按具体 access token ID
-重新校验。用户禁用、密码修改、角色修改、退出和关系撤销都会关闭相关订阅及上游连接。
+重新校验。默认多端登录并存，access TTL 为 24h，refresh/登录会话绝对期限为 168h。
+`Auth.SingleSession=true` 时新登录事务撤销该用户旧登录。单端刷新、退出和登录会话撤销
+不关闭用户共享的上游连接；事件订阅按各自 token 检查失效。用户禁用、密码修改、角色修改、
+全部退出和关系撤销仍关闭相关订阅及上游连接。
 
 用户与容器元数据可缓存，PasswordHash 在写缓存前清除。关系和 token 不缓存。更新先提交 SQLite，
 再失效缓存；如果未来 Redis 失效失败，当前实例切换为 DB bypass，避免陈旧值影响显示。多实例 Redis

@@ -211,7 +211,7 @@ func (s *Service) agentSettings(c *gin.Context) {
 		if !decode(c, &req) {
 			return
 		}
-		if req.Mode != "always-ask" && req.Mode != "llm-approve" {
+		if req.Mode != "always-ask" && req.Mode != "llm-approve" && req.Mode != "always-approve" {
 			lib.Error(c, 422, "ValidationFailed", "Unsupported default permission mode")
 			return
 		}

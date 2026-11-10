@@ -26,6 +26,9 @@ type approval struct {
 	conn                           *agentconn.Connection
 	rpcID                          json.RawMessage
 	user, container, session, turn string
+	done                           chan struct{}
+	kind                           string
+	params                         map[string]any
 	options                        map[string]bool
 	expires                        time.Time
 }
@@ -39,7 +42,7 @@ func (s *Service) registerRuntime(api *gin.RouterGroup, secured *gin.RouterGroup
 	api.GET("/events", s.eventSocket)
 	secured = secured.Group("")
 	secured.Use(func(c *gin.Context) {
-		if c.Request.Method == http.MethodGet {
+		if c.Request.Method == http.MethodGet || strings.HasSuffix(c.FullPath(), "/response") || strings.HasSuffix(c.FullPath(), "/cancel") {
 			c.Next()
 			return
 		}
@@ -68,7 +71,10 @@ func (s *Service) registerRuntime(api *gin.RouterGroup, secured *gin.RouterGroup
 	secured.GET("/turns/:turnId", s.getTurn)
 	secured.POST("/turns/:turnId/cancel", s.cancelTurn)
 	secured.POST("/turns/:turnId/approvals/:approvalId/response", s.replyApproval)
+	secured.POST("/turns/:turnId/interactions/:interactionId/response", s.replyInteraction)
+	secured.GET("/containers/:containerId/interactions", s.listInteractions)
 	secured.GET("/containers/:containerId/files", s.listFiles)
+	secured.GET("/containers/:containerId/file-content", s.readFile)
 	secured.GET("/containers/:containerId/agent-settings", s.agentSettings)
 	secured.PATCH("/containers/:containerId/agent-settings", s.agentSettings)
 	secured.GET("/containers/:containerId/mcp-servers", s.agentRead("_list_mcp", nil))
@@ -94,6 +100,10 @@ func (s *Service) connection(ctx context.Context, p auth.Principal, container st
 }
 func (s *Service) readEvents(conn *agentconn.Connection, user, container string) {
 	defer s.wg.Done()
+	// Child ACP sessions are runtime identities, not independently authorized
+	// database sessions. Only route children announced by an owned parent on
+	// this connection; discard these mappings when the connection closes.
+	children := make(map[string]storage.Session)
 	defer func() {
 		s.runtimeMu.Lock()
 		delete(s.attached, conn)
@@ -105,6 +115,7 @@ func (s *Service) readEvents(conn *agentconn.Connection, user, container string)
 		for id, a := range s.approvals {
 			if a.conn == conn {
 				delete(s.approvals, id)
+				close(a.done)
 			}
 		}
 		s.runtimeMu.Unlock()
@@ -117,11 +128,18 @@ func (s *Service) readEvents(conn *agentconn.Connection, user, container string)
 		}
 		remote, _ := params["sessionId"].(string)
 		var session storage.Session
+		childSessionID := ""
 		if e := s.Repo.DB.WithContext(s.ctx).First(&session, "remote_id=? AND container_id=? AND user_id=?", remote, container, user).Error; e != nil {
-			if len(msg.ID) > 0 && msg.Method == "session/request_permission" {
-				_ = conn.Reply(msg.ID, gin.H{"outcome": gin.H{"outcome": "cancelled"}})
+			parent, known := children[remote]
+			if known && (msg.Method == "session/update" || isInteractionRequest(msg.Method)) {
+				session = parent
+				childSessionID = remote
+			} else {
+				if len(msg.ID) > 0 && isInteractionRequest(msg.Method) {
+					_ = conn.Reply(msg.ID, cancelledInteraction(msg.Method))
+				}
+				continue
 			}
-			continue
 		}
 		var turn storage.Turn
 		requestID := ""
@@ -133,47 +151,18 @@ func (s *Service) readEvents(conn *agentconn.Connection, user, container string)
 		} else {
 			_ = s.Repo.DB.WithContext(s.ctx).Where("session_id=? AND state IN ?", session.ID, []string{"running", "awaiting_approval", "cancelling"}).First(&turn).Error
 		}
-		if msg.Method == "session/request_permission" && len(msg.ID) > 0 {
-			rawOptions, _ := params["options"].([]any)
-			allowed := map[string]bool{}
-			for _, o := range rawOptions {
-				if item, ok := o.(map[string]any); ok {
-					if id, ok := item["optionId"].(string); ok {
-						allowed[id] = true
-					}
+		if isInteractionRequest(msg.Method) && len(msg.ID) > 0 {
+			s.requestInteraction(conn, msg, params, session, turn, user, container)
+		} else if msg.Method == "session/update" || msg.Method == "_codeflow/session_notification" || strings.HasPrefix(msg.Method, "codeflow/") || strings.HasPrefix(msg.Method, "x.ai/") {
+			if update, ok := params["update"].(map[string]any); ok && update["sessionUpdate"] == "subagent_spawned" {
+				if child, ok := update["child_session_id"].(string); ok && child != "" && len(children) < 4096 {
+					children[child] = session
 				}
 			}
-			if turn.ID == "" || len(allowed) == 0 {
-				_ = conn.Reply(msg.ID, gin.H{"outcome": gin.H{"outcome": "cancelled"}})
-				continue
-			}
-			id := uuid.NewString()
-			a := &approval{conn: conn, rpcID: msg.ID, user: user, container: container, session: session.ID, turn: turn.ID, options: allowed, expires: time.Now().Add(5 * time.Minute)}
-			s.runtimeMu.Lock()
-			s.approvals[id] = a
-			s.runtimeMu.Unlock()
-			_ = s.Repo.DB.WithContext(s.ctx).Model(&turn).Where("state = ?", "running").Update("state", "awaiting_approval").Error
-			s.hub.Publish(events.Key{UserID: user, ContainerID: container}, events.Event{Type: "approval.requested", SessionID: session.ID, TurnID: turn.ID, Payload: gin.H{"approvalId": id, "options": redact(params["options"]), "toolCall": redact(params["toolCall"]), "expiresAt": a.expires.UTC().Format(time.RFC3339)}})
-			s.wg.Add(1)
-			go func() {
-				defer s.wg.Done()
-				timer := time.NewTimer(time.Until(a.expires))
-				defer timer.Stop()
-				select {
-				case <-timer.C:
-					s.runtimeMu.Lock()
-					pending := s.approvals[id]
-					delete(s.approvals, id)
-					s.runtimeMu.Unlock()
-					if pending != nil {
-						_ = conn.Reply(a.rpcID, gin.H{"outcome": gin.H{"outcome": "cancelled"}})
-					}
-				case <-conn.Done():
-				case <-s.ctx.Done():
-				}
-			}()
-		} else if msg.Method == "session/update" || strings.HasPrefix(msg.Method, "codeflow/") || strings.HasPrefix(msg.Method, "x.ai/") {
 			delete(params, "sessionId")
+			if childSessionID != "" {
+				params["childSessionId"] = childSessionID
+			}
 			s.hub.Publish(events.Key{UserID: user, ContainerID: container}, events.Event{Type: "session.update", SessionID: session.ID, TurnID: turn.ID, Payload: redact(params)})
 		}
 	}
@@ -470,7 +459,7 @@ func (s *Service) createSession(c *gin.Context) {
 	if _, ok := s.rpc(c, conn, "session/set_mode", gin.H{"sessionId": result.SessionID, "modeId": "always-ask"}); !ok {
 		return
 	}
-	row := storage.Session{ID: uuid.NewString(), UserID: p.UserID, AssignmentID: a.ID, ContainerID: container.ID, RemoteID: result.SessionID, ProjectID: projectID, Title: "New session", Cwd: req.Cwd, ModelID: result.Models.CurrentModelID}
+	row := storage.Session{ID: uuid.NewString(), UserID: p.UserID, AssignmentID: a.ID, ContainerID: container.ID, RemoteID: result.SessionID, ProjectID: projectID, Title: "New session", Cwd: req.Cwd, ModelID: result.Models.CurrentModelID, ModeID: "always-ask"}
 	if e := s.saveSession(c.Request.Context(), &row, op); e != nil {
 		lib.Error(c, 500, "SessionIndexFailed", "Session may exist remotely; do not automatically retry")
 		return
@@ -501,7 +490,27 @@ func (s *Service) loadSession(c *gin.Context) {
 		return
 	}
 	if s.hasActiveTurn(row.ID) {
-		lib.Error(c, 409, "TurnAlreadyRunning", "Wait for the active turn before loading history")
+		s.runtimeMu.Lock()
+		same := s.loaded[row.ID] == conn
+		s.runtimeMu.Unlock()
+		if same {
+			// Reattach the browser without replaying or resetting an active ACP session.
+			lib.OK(c, gin.H{"sessionId": row.ID, "loaded": true, "active": true})
+		} else {
+			lib.Error(c, 409, "TurnOutcomeUnknown", "Original connection was lost")
+		}
+		return
+	}
+	// The deployed ACP server cannot load history while a prompt is waiting
+	// for a client response on the same connection. Fail promptly so controls
+	// for that turn remain usable instead of queuing loads behind a command lock.
+	var active int64
+	if err := s.Repo.DB.WithContext(c.Request.Context()).Table("turns").Joins("JOIN sessions ON sessions.id=turns.session_id").Where("turns.user_id=? AND sessions.container_id=? AND turns.state IN ?", row.UserID, row.ContainerID, []string{"running", "awaiting_approval", "cancelling"}).Count(&active).Error; err != nil {
+		failed(c, err)
+		return
+	}
+	if active > 0 {
+		lib.Error(c, 409, "ContainerBusy", "Answer or stop the active task before loading another session")
 		return
 	}
 	key := events.Key{UserID: row.UserID, ContainerID: row.ContainerID}
@@ -509,7 +518,7 @@ func (s *Service) loadSession(c *gin.Context) {
 	if _, ok := s.rpc(c, conn, "session/load", gin.H{"sessionId": row.RemoteID, "cwd": row.Cwd, "mcpServers": []any{}}); !ok {
 		return
 	}
-	if _, ok := s.rpc(c, conn, "session/set_mode", gin.H{"sessionId": row.RemoteID, "modeId": "always-ask"}); !ok {
+	if _, ok := s.rpc(c, conn, "session/set_mode", gin.H{"sessionId": row.RemoteID, "modeId": row.ModeID}); !ok {
 		return
 	}
 	s.runtimeMu.Lock()
@@ -529,7 +538,7 @@ func (s *Service) setSession(c *gin.Context, method, field string) {
 		lib.Error(c, 422, "ValidationFailed", "Invalid session setting")
 		return
 	}
-	if field == "modeId" && req[field] != "always-ask" && req[field] != "llm-approve" {
+	if field == "modeId" && req[field] != "always-ask" && req[field] != "llm-approve" && req[field] != "always-approve" {
 		lib.Error(c, 403, "PermissionDenied", "This permission mode is not allowed")
 		return
 	}
@@ -555,6 +564,12 @@ func (s *Service) setSession(c *gin.Context, method, field string) {
 	}
 	if field == "modelId" {
 		_ = s.Repo.DB.WithContext(c.Request.Context()).Model(&row).Update("model_id", req[field]).Error
+	}
+	if field == "modeId" {
+		if err := s.Repo.DB.WithContext(c.Request.Context()).Model(&row).Update("mode_id", req[field]).Error; err != nil {
+			failed(c, err)
+			return
+		}
 	}
 	lib.OK(c, gin.H{"sessionId": row.ID, field: req[field]})
 }
@@ -671,7 +686,9 @@ func (s *Service) runTurn(conn *agentconn.Connection, session storage.Session, t
 	s.runtimeMu.Lock()
 	for id, a := range s.approvals {
 		if a.turn == turn.ID {
+			_ = a.conn.Reply(a.rpcID, cancelledKind(a.kind))
 			delete(s.approvals, id)
+			close(a.done)
 		}
 	}
 	s.runtimeMu.Unlock()
@@ -735,41 +752,7 @@ func (s *Service) replyApproval(c *gin.Context) {
 	if !decode(c, &req) {
 		return
 	}
-	s.access.RLock()
-	defer s.access.RUnlock()
-	p := principal(c)
-	id := c.Param("approvalId")
-	s.runtimeMu.Lock()
-	a := s.approvals[id]
-	s.runtimeMu.Unlock()
-	if a == nil || a.user != p.UserID || a.turn != c.Param("turnId") {
-		lib.Error(c, 409, "ApprovalExpired", "Approval is no longer pending")
-		return
-	}
-	if _, _, e := s.ContainerFor(c.Request.Context(), p, a.container); e != nil {
-		failed(c, e)
-		return
-	}
-	if !a.options[req.OptionID] || time.Now().After(a.expires) {
-		lib.Error(c, 422, "InvalidApprovalOption", "Invalid or expired approval option")
-		return
-	}
-	s.runtimeMu.Lock()
-	if s.approvals[id] != a {
-		s.runtimeMu.Unlock()
-		lib.Error(c, 409, "ApprovalExpired", "Approval already resolved")
-		return
-	}
-	delete(s.approvals, id)
-	s.runtimeMu.Unlock()
-	if e := a.conn.Reply(a.rpcID, gin.H{"outcome": gin.H{"outcome": "selected", "optionId": req.OptionID}}); e != nil {
-		lib.Error(c, 409, "ApprovalExpired", "Original connection is unavailable")
-		return
-	}
-	_ = s.Repo.DB.WithContext(c.Request.Context()).Model(&storage.Turn{}).Where("id=? AND state=?", a.turn, "awaiting_approval").Update("state", "running").Error
-	_ = s.Repo.Audit(c.Request.Context(), p.UserID, "approval.response", a.turn, "success")
-	s.hub.Publish(events.Key{UserID: p.UserID, ContainerID: a.container}, events.Event{Type: "approval.resolved", SessionID: a.session, TurnID: a.turn, Payload: gin.H{"approvalId": id}})
-	c.Status(204)
+	s.respondInteraction(c, c.Param("approvalId"), gin.H{"outcome": map[string]any{"outcome": "selected", "optionId": req.OptionID}}, "permission")
 }
 func (s *Service) listFiles(c *gin.Context) {
 	s.access.RLock()
@@ -804,6 +787,69 @@ func (s *Service) listFiles(c *gin.Context) {
 	var body any
 	if json.Unmarshal(raw, &body) != nil {
 		lib.Error(c, 502, "RemoteProtocolError", "Invalid directory response")
+		return
+	}
+	lib.OK(c, body)
+}
+func (s *Service) readFile(c *gin.Context) {
+	s.access.RLock()
+	defer s.access.RUnlock()
+	p := principal(c)
+	container, _, err := s.ContainerFor(c.Request.Context(), p, c.Param("containerId"))
+	if err != nil {
+		failed(c, err)
+		return
+	}
+	filePath := c.Query("path")
+	var roots []string
+	_ = json.Unmarshal([]byte(container.WorkspaceRootsJSON), &roots)
+	if filePath == "" || !allowedPath(filePath, roots) {
+		lib.Error(c, 422, "ValidationFailed", "File must be inside an assigned workspace root")
+		return
+	}
+	conn, err := s.connection(c.Request.Context(), p, container.ID)
+	if err != nil {
+		lib.Error(c, 503, "ContainerUnavailable", "Container is unavailable")
+		return
+	}
+	root := ""
+	for _, candidate := range roots {
+		if allowedPath(filePath, []string{candidate}) {
+			root = candidate
+			break
+		}
+	}
+	raw, err := conn.Call(c.Request.Context(), "_fs/readFile", gin.H{"path": filePath, "root": root})
+	if err != nil {
+		var rpc *agentconn.RPCError
+		if errors.As(err, &rpc) && rpc.Code == -32601 {
+			lib.Error(c, 501, "CapabilityUnsupported", "Container does not support file preview")
+		} else {
+			lib.Error(c, 502, "RemoteError", "Container file read failed")
+		}
+		return
+	}
+	var body struct {
+		Path      string `json:"path"`
+		Type      string `json:"type,omitempty"`
+		Entries   []any  `json:"entries,omitempty"`
+		Content   string `json:"content"`
+		Size      int64  `json:"size"`
+		Truncated bool   `json:"truncated"`
+	}
+	if json.Unmarshal(raw, &body) != nil || body.Path != filePath {
+		lib.Error(c, 502, "RemoteProtocolError", "Invalid file response")
+		return
+	}
+	if body.Size < 0 || len(body.Content) > 1<<20 {
+		lib.Error(c, 413, "FileTooLarge", "File exceeds the preview limit")
+		return
+	}
+	if body.Type == "directory" {
+		if body.Entries == nil {
+			body.Entries = []any{}
+		}
+		lib.OK(c, gin.H{"path": body.Path, "type": "directory", "entries": body.Entries})
 		return
 	}
 	lib.OK(c, body)

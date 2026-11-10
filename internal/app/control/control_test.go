@@ -16,8 +16,10 @@ import (
 	"time"
 
 	"echo-service/internal/agentconn"
+	"echo-service/internal/auth"
 	"echo-service/internal/client"
 	"echo-service/internal/config"
+	"echo-service/internal/events"
 	"echo-service/internal/storage"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -140,7 +142,7 @@ func TestAuthIsolationAndCacheInvalidation(t *testing.T) {
 	f.request(t, "POST", "/auth/login", "", gin.H{"username": "alice", "password": "alice-test-password"}, 401)
 }
 
-func fakeAgent(t *testing.T) (string, *atomic.Int32) {
+func fakeAgent(t *testing.T, withSubagents ...bool) (string, *atomic.Int32) {
 	t.Helper()
 	count := &atomic.Int32{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -171,6 +173,12 @@ func fakeAgent(t *testing.T) (string, *atomic.Int32) {
 				reply(m.ID, gin.H{"sessionId": uuid.NewString(), "models": gin.H{"currentModelId": "test-model"}})
 			case "session/load", "session/set_model", "session/set_mode", "_rename_session", "_delete_session", "_project/delete", "_project/update":
 				reply(m.ID, gin.H{})
+			case "_fs/readFile":
+				if params["path"] == "/workspace/empty" {
+					reply(m.ID, gin.H{"path": params["path"], "type": "directory", "entries": []any{}})
+				} else {
+					reply(m.ID, gin.H{"path": params["path"], "content": "hello", "size": 5, "truncated": false})
+				}
 			case "_get_common_settings", "_edit_common_settings":
 				reply(m.ID, gin.H{"mode": "always-ask", "base_url": "hidden", "oauth2": gin.H{"client_secret": "hidden"}})
 			case "session/prompt":
@@ -179,6 +187,14 @@ func fakeAgent(t *testing.T) (string, *atomic.Int32) {
 				session = params["sessionId"].(string)
 				p, _ := json.Marshal(gin.H{"sessionId": session, "options": []any{gin.H{"optionId": "allow-once", "kind": "allow_once"}, gin.H{"optionId": "reject-once", "kind": "reject_once"}}, "toolCall": gin.H{"toolCallId": "tool-1", "title": "Read workspace"}})
 				_ = conn.WriteJSON(agentconn.Message{JSONRPC: "2.0", ID: json.RawMessage(`"permission-1"`), Method: "session/request_permission", Params: p})
+				if len(withSubagents) > 1 && withSubagents[1] {
+					p, _ := json.Marshal(gin.H{"sessionId": session, "toolCallId": "ask-1", "questions": []any{gin.H{"id": "q", "question": "Which?", "options": []any{gin.H{"label": "A", "description": "First"}}}}})
+					method := "_codeflow/ask_user_question"
+					if len(withSubagents) > 2 && withSubagents[2] {
+						method = "codeflow/ask_user_question"
+					}
+					_ = conn.WriteJSON(agentconn.Message{JSONRPC: "2.0", ID: json.RawMessage(`"ask-1"`), Method: method, Params: p})
+				}
 			case "session/cancel":
 				if len(m.ID) > 0 {
 					t.Error("cancel must be notification")
@@ -186,7 +202,32 @@ func fakeAgent(t *testing.T) (string, *atomic.Int32) {
 				reply(pending, gin.H{"stopReason": "cancelled"})
 				pending = nil
 			case "":
+				if len(withSubagents) > 1 && withSubagents[1] && string(m.ID) == `"permission-1"` {
+					continue
+				}
+				if len(withSubagents) > 1 && withSubagents[1] && string(m.ID) == `"ask-1"` {
+					var result map[string]any
+					_ = json.Unmarshal(m.Result, &result)
+					if m.Error != nil || result["outcome"] != "accepted" && result["outcome"] != "cancelled" {
+						t.Errorf("invalid ask response: %+v", m)
+					}
+				}
 				if len(pending) > 0 {
+					if len(withSubagents) > 0 && withSubagents[0] {
+						for _, event := range []struct {
+							method, remote string
+							update         gin.H
+						}{
+							{"_codeflow/session_notification", "foreign-parent", gin.H{"sessionUpdate": "subagent_spawned", "child_session_id": "foreign-child"}},
+							{"session/update", "foreign-child", gin.H{"sessionUpdate": "agent_message_chunk", "content": gin.H{"type": "text", "text": "must not leak"}}},
+							{"_codeflow/session_notification", session, gin.H{"sessionUpdate": "subagent_spawned", "subagent_id": "agent-1", "child_session_id": "child-1", "subagent_type": "sa-agent"}},
+							{"session/update", "child-1", gin.H{"sessionUpdate": "agent_message_chunk", "content": gin.H{"type": "text", "text": "SA_CHILD_OK"}}},
+							{"_codeflow/session_notification", session, gin.H{"sessionUpdate": "subagent_finished", "subagent_id": "agent-1", "child_session_id": "child-1", "status": "completed"}},
+						} {
+							p, _ := json.Marshal(gin.H{"sessionId": event.remote, "update": event.update})
+							_ = conn.WriteJSON(agentconn.Message{JSONRPC: "2.0", Method: event.method, Params: p})
+						}
+					}
 					p, _ := json.Marshal(gin.H{"sessionId": session, "update": gin.H{"sessionUpdate": "agent_message_chunk", "content": gin.H{"type": "text", "text": "done"}}})
 					_ = conn.WriteJSON(agentconn.Message{JSONRPC: "2.0", Method: "session/update", Params: p})
 					reply(pending, gin.H{"stopReason": "end_turn"})
@@ -199,6 +240,34 @@ func fakeAgent(t *testing.T) (string, *atomic.Int32) {
 	}))
 	t.Cleanup(server.Close)
 	return "ws" + strings.TrimPrefix(server.URL, "http"), count
+}
+
+func TestSubagentStreamRoutesOnlyAnnouncedChildrenOfOwnedParents(t *testing.T) {
+	endpoint, _ := fakeAgent(t, true)
+	f := setup(t)
+	id, _, token := f.assign(t, endpoint, "/workspace")
+	ticket := data(f.request(t, "POST", "/ws-tickets", token, gin.H{"containerId": id}, 200))["ticket"].(string)
+	socket, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(f.url, "http")+"/api/v1/events?ticket="+ticket, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer socket.Close()
+	readEvent(t, socket, "connection.ready")
+	session := data(f.request(t, "POST", "/containers/"+id+"/sessions", token, gin.H{"cwd": "/workspace"}, 201, "subagent-session"))["id"].(string)
+	turn := data(f.request(t, "POST", "/sessions/"+session+"/turns", token, gin.H{"clientRequestId": "subagent-turn", "content": []any{gin.H{"type": "text", "text": "test"}}}, 202))["id"].(string)
+	approval := readEvent(t, socket, "approval.requested")["payload"].(map[string]any)["approvalId"].(string)
+	f.request(t, "POST", "/turns/"+turn+"/approvals/"+approval+"/response", token, gin.H{"optionId": "allow-once"}, 204)
+	for _, expected := range []string{"subagent_spawned", "agent_message_chunk", "subagent_finished"} {
+		event := readEvent(t, socket, "session.update")
+		payload := event["payload"].(map[string]any)
+		update := payload["update"].(map[string]any)
+		if event["sessionId"] != session || update["sessionUpdate"] != expected {
+			t.Fatalf("incorrect routing: %#v", event)
+		}
+		if expected == "agent_message_chunk" && (payload["childSessionId"] != "child-1" || update["content"].(map[string]any)["text"] != "SA_CHILD_OK") {
+			t.Fatalf("child output lost: %#v", event)
+		}
+	}
 }
 
 func readEvent(t *testing.T, conn *websocket.Conn, kind string) map[string]any {
@@ -242,7 +311,11 @@ func TestPromptApprovalCancelIdempotencyAndRevocation(t *testing.T) {
 		t.Fatal("session create duplicated")
 	}
 	f.request(t, "GET", "/sessions/"+session, f.admin, nil, 404)
-	f.request(t, "PUT", "/sessions/"+session+"/mode", token, gin.H{"modeId": "always-approve"}, 403)
+	f.request(t, "PUT", "/sessions/"+session+"/mode", token, gin.H{"modeId": "always-approve"}, 200)
+	f.request(t, "POST", "/sessions/"+session+"/load", token, gin.H{}, 200)
+	if saved := data(f.request(t, "GET", "/sessions/"+session, token, nil, 200)); saved["modeId"] != "always-approve" {
+		t.Fatalf("permission mode lost after load: %#v", saved)
+	}
 	for i := 0; i < 2; i++ {
 		payload := gin.H{"clientRequestId": fmt.Sprintf("turn-%d", i), "content": []any{gin.H{"type": "text", "text": "hello"}}}
 		turn := data(f.request(t, "POST", "/sessions/"+session+"/turns", token, payload, 202))
@@ -357,5 +430,114 @@ func TestCreateSessionRequiresExplicitWorkspace(t *testing.T) {
 	var count int64
 	if err := f.s.Repo.DB.Model(&storage.Session{}).Count(&count).Error; err != nil || count != 0 {
 		t.Fatal("session created without an explicit workspace", err, count)
+	}
+}
+
+func TestRefreshAndDeviceLogoutKeepOtherDeviceStream(t *testing.T) {
+	endpoint, _ := fakeAgent(t)
+	f := setup(t)
+	id, _, first := f.assign(t, endpoint, "/workspace")
+	second := data(f.request(t, "POST", "/auth/login", "", gin.H{"username": "alice", "password": "alice-test-password", "deviceName": "second"}, 200))["tokens"].(map[string]any)
+	ticket := data(f.request(t, "POST", "/ws-tickets", first, gin.H{"containerId": id}, 200))["ticket"].(string)
+	socket, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(f.url, "http")+"/api/v1/events?ticket="+ticket, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer socket.Close()
+	readEvent(t, socket, "connection.ready")
+	f.request(t, "POST", "/containers/"+id+"/sessions", first, gin.H{"cwd": "/workspace"}, 201, "multi-login")
+	assertConnected := func() {
+		f.request(t, "GET", "/me", first, nil, 200)
+		f.s.runtimeMu.Lock()
+		attached := len(f.s.attached)
+		f.s.runtimeMu.Unlock()
+		if attached != 1 {
+			t.Fatal("shared upstream disconnected", attached)
+		}
+		f.s.hub.Publish(events.Key{UserID: mustPrincipal(t, f.s, first).UserID, ContainerID: id}, events.Event{Type: "test.alive"})
+		readEvent(t, socket, "test.alive")
+	}
+	refreshed := data(f.request(t, "POST", "/auth/refresh", "", gin.H{"refreshToken": second["refreshToken"]}, 200))
+	assertConnected()
+	f.request(t, "POST", "/auth/logout", refreshed["accessToken"].(string), gin.H{}, 204)
+	assertConnected()
+	// Replaying a refresh revokes only that login, never another device's stream.
+	f.request(t, "POST", "/auth/refresh", "", gin.H{"refreshToken": second["refreshToken"]}, 401)
+	assertConnected()
+}
+
+func mustPrincipal(t *testing.T, s *Service, token string) auth.Principal {
+	t.Helper()
+	p, err := s.Auth.Authenticate(context.Background(), token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestUnifiedInteractionsPermissionAskRecoveryAndOwnership(t *testing.T) {
+	endpoint, _ := fakeAgent(t, false, true, true)
+	f := setup(t)
+	id, _, token := f.assign(t, endpoint, "/workspace")
+	ticket := data(f.request(t, "POST", "/ws-tickets", token, gin.H{"containerId": id}, 200))["ticket"].(string)
+	socket, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(f.url, "http")+"/api/v1/events?ticket="+ticket, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer socket.Close()
+	readEvent(t, socket, "connection.ready")
+	session := data(f.request(t, "POST", "/containers/"+id+"/sessions", token, gin.H{"cwd": "/workspace"}, 201, "interaction-session"))["id"].(string)
+	for i := 0; i < 2; i++ {
+		turn := data(f.request(t, "POST", "/sessions/"+session+"/turns", token, gin.H{"clientRequestId": fmt.Sprint("interaction", i), "content": []any{gin.H{"type": "text", "text": "ask"}}}, 202))["id"].(string)
+		first := readEvent(t, socket, "interaction.requested")["payload"].(map[string]any)
+		second := readEvent(t, socket, "interaction.requested")["payload"].(map[string]any)
+		if first["kind"] != "permission" || second["kind"] != "ask" {
+			t.Fatal(first, second)
+		}
+		items := data(f.request(t, "GET", "/containers/"+id+"/interactions", token, nil, 200))["items"].([]any)
+		if len(items) != 2 {
+			t.Fatal("pending snapshot", items)
+		}
+		f.request(t, "POST", "/sessions/"+session+"/load", token, gin.H{}, 200)
+		other := data(f.request(t, "POST", "/containers/"+id+"/sessions", token, gin.H{"cwd": "/workspace"}, 201, fmt.Sprint("other", i)))["id"].(string)
+		f.request(t, "POST", "/sessions/"+other+"/load", token, gin.H{}, 409)
+
+		path := "/turns/" + turn + "/interactions/" + first["interactionId"].(string) + "/response"
+		f.request(t, "POST", path, token, gin.H{"response": gin.H{"outcome": gin.H{"outcome": "selected", "optionId": "invented"}}}, 422)
+		f.request(t, "POST", path, token, gin.H{"response": gin.H{"outcome": gin.H{"outcome": "selected", "optionId": "allow-once"}}}, 204)
+		path = "/turns/" + turn + "/interactions/" + second["interactionId"].(string) + "/response"
+		f.request(t, "POST", path, f.admin, gin.H{"response": gin.H{"outcome": "cancelled"}}, 409)
+		f.request(t, "POST", path, token, gin.H{"response": gin.H{"outcome": "accepted", "answers": gin.H{"q": []any{1}}}}, 422)
+		if i == 0 {
+			f.request(t, "POST", path, token, gin.H{"response": gin.H{"outcome": "accepted", "answers": gin.H{"q": []string{"A"}}, "annotations": gin.H{"q": gin.H{"preview": "sample", "notes": "note"}}}}, 204)
+			f.request(t, "POST", path, token, gin.H{"response": gin.H{"outcome": "cancelled"}}, 409)
+			readEvent(t, socket, "turn.completed")
+		} else {
+			f.request(t, "POST", "/turns/"+turn+"/cancel", token, gin.H{}, 202)
+			readEvent(t, socket, "turn.cancelled")
+		}
+		items = data(f.request(t, "GET", "/containers/"+id+"/interactions", token, nil, 200))["items"].([]any)
+		if len(items) != 0 {
+			t.Fatal("pending not cleaned", items)
+		}
+	}
+}
+
+func TestFilePreviewGatewayAuthorizationAndPaths(t *testing.T) {
+	endpoint, _ := fakeAgent(t)
+	f := setup(t)
+	id, _, token := f.assign(t, endpoint, "/workspace")
+	route := "/containers/" + id + "/file-content?path="
+	got := data(f.request(t, "GET", route+"/workspace/a.txt", token, nil, 200))
+	if got["content"] != "hello" {
+		t.Fatal(got)
+	}
+	empty := data(f.request(t, "GET", route+"/workspace/empty", token, nil, 200))
+	if empty["type"] != "directory" || len(empty["entries"].([]any)) != 0 {
+		t.Fatal(empty)
+	}
+	f.request(t, "GET", route+"/workspace/a.txt", f.admin, nil, 404)
+	for _, p := range []string{"/workspace/../etc/passwd", "/workspace-other/file", "relative", "/etc/passwd"} {
+		f.request(t, "GET", route+p, token, nil, 422)
 	}
 }
