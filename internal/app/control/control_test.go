@@ -173,7 +173,7 @@ func fakeAgent(t *testing.T, withSubagents ...bool) (string, *atomic.Int32) {
 				reply(m.ID, gin.H{"sessionId": uuid.NewString(), "models": gin.H{"currentModelId": "test-model"}})
 			case "session/load", "session/set_model", "session/set_mode", "_rename_session", "_delete_session", "_project/delete", "_project/update":
 				reply(m.ID, gin.H{})
-			case "_fs/readFile":
+			case "fs/readFile":
 				if params["path"] == "/workspace/empty" {
 					reply(m.ID, gin.H{"path": params["path"], "type": "directory", "entries": []any{}})
 				} else {

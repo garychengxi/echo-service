@@ -120,6 +120,10 @@ func (s *Service) readEvents(conn *agentconn.Connection, user, container string)
 		}
 		s.runtimeMu.Unlock()
 		s.hub.Publish(events.Key{UserID: user, ContainerID: container}, events.Event{Type: "stream.reset", Payload: gin.H{"reason": "upstreamDisconnected", "requiresLoad": true}})
+		if s.ctx.Err() == nil {
+			s.wg.Add(1)
+			go s.reconnectAgent(user, container)
+		}
 	}()
 	for msg := range conn.Events() {
 		var params map[string]any
@@ -164,6 +168,46 @@ func (s *Service) readEvents(conn *agentconn.Connection, user, container string)
 				params["childSessionId"] = childSessionID
 			}
 			s.hub.Publish(events.Key{UserID: user, ContainerID: container}, events.Event{Type: "session.update", SessionID: session.ID, TurnID: turn.ID, Payload: redact(params)})
+		}
+	}
+}
+
+// reconnectAgent keeps the container ACP lifecycle alive after a transport
+// failure. The next authenticated request no longer needs to be the trigger
+// for dialing the remote Agent again.
+func (s *Service) reconnectAgent(user, container string) {
+	defer s.wg.Done()
+	backoff := time.Second
+	for s.ctx.Err() == nil {
+		item, err := s.Repo.Container(s.ctx, container)
+		if err == nil {
+			if a, e := s.Repo.Assignment(s.ctx, user, container); e == nil {
+				conn, e := s.Connections.Acquire(s.ctx, agentconn.Key{UserID: user, AssignmentID: a.ID, ContainerID: item.ID}, item.Endpoint)
+				if e == nil {
+					s.runtimeMu.Lock()
+					attached := s.attached[conn]
+					if !attached {
+						s.attached[conn] = true
+					}
+					s.runtimeMu.Unlock()
+					if !attached {
+						s.wg.Add(1)
+						go s.readEvents(conn, user, container)
+					}
+					return
+				}
+			}
+		}
+		select {
+		case <-time.After(backoff):
+		case <-s.ctx.Done():
+			return
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+			if backoff > 30*time.Second {
+				backoff = 30 * time.Second
+			}
 		}
 	}
 }
@@ -811,7 +855,7 @@ func (s *Service) readFile(c *gin.Context) {
 			break
 		}
 	}
-	raw, err := conn.Call(c.Request.Context(), "_fs/readFile", gin.H{"path": filePath, "root": root})
+	raw, err := conn.Call(c.Request.Context(), "fs/readFile", gin.H{"path": filePath, "root": root})
 	if err != nil {
 		var rpc *agentconn.RPCError
 		if errors.As(err, &rpc) && rpc.Code == -32601 {
