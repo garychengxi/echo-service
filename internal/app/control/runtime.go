@@ -855,7 +855,9 @@ func (s *Service) readFile(c *gin.Context) {
 			break
 		}
 	}
-	raw, err := conn.Call(c.Request.Context(), "fs/readFile", gin.H{"path": filePath, "root": root})
+	// ACP extension methods use the legacy underscore wire alias on remote
+	// servers; the dispatcher resolves it to the registered fs/readFile method.
+	raw, err := conn.Call(c.Request.Context(), "_fs/readFile", gin.H{"path": filePath, "root": root})
 	if err != nil {
 		var rpc *agentconn.RPCError
 		if errors.As(err, &rpc) && rpc.Code == -32601 {
