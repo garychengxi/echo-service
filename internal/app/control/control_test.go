@@ -324,6 +324,10 @@ func TestPromptApprovalCancelIdempotencyAndRevocation(t *testing.T) {
 		if event["turnId"] != turnID || event["sessionId"] != session {
 			t.Fatal("event ownership mapping lost", event)
 		}
+		if i == 0 {
+			other := data(f.request(t, "POST", "/containers/"+id+"/sessions", token, gin.H{"cwd": "/workspace"}, 201, "session-2"))
+			f.request(t, "POST", "/sessions/"+other["id"].(string)+"/load", token, gin.H{}, 200)
+		}
 		f.request(t, "POST", "/sessions/"+session+"/turns", token, payload, 200)
 		if count.Load() != int32(i+1) {
 			t.Fatal("duplicate prompt dispatched")
@@ -500,7 +504,7 @@ func TestUnifiedInteractionsPermissionAskRecoveryAndOwnership(t *testing.T) {
 		}
 		f.request(t, "POST", "/sessions/"+session+"/load", token, gin.H{}, 200)
 		other := data(f.request(t, "POST", "/containers/"+id+"/sessions", token, gin.H{"cwd": "/workspace"}, 201, fmt.Sprint("other", i)))["id"].(string)
-		f.request(t, "POST", "/sessions/"+other+"/load", token, gin.H{}, 409)
+		f.request(t, "POST", "/sessions/"+other+"/load", token, gin.H{}, 200)
 
 		path := "/turns/" + turn + "/interactions/" + first["interactionId"].(string) + "/response"
 		f.request(t, "POST", path, token, gin.H{"response": gin.H{"outcome": gin.H{"outcome": "selected", "optionId": "invented"}}}, 422)

@@ -501,18 +501,10 @@ func (s *Service) loadSession(c *gin.Context) {
 		}
 		return
 	}
-	// The deployed ACP server cannot load history while a prompt is waiting
-	// for a client response on the same connection. Fail promptly so controls
-	// for that turn remain usable instead of queuing loads behind a command lock.
-	var active int64
-	if err := s.Repo.DB.WithContext(c.Request.Context()).Table("turns").Joins("JOIN sessions ON sessions.id=turns.session_id").Where("turns.user_id=? AND sessions.container_id=? AND turns.state IN ?", row.UserID, row.ContainerID, []string{"running", "awaiting_approval", "cancelling"}).Count(&active).Error; err != nil {
-		failed(c, err)
-		return
-	}
-	if active > 0 {
-		lib.Error(c, 409, "ContainerBusy", "Answer or stop the active task before loading another session")
-		return
-	}
+	// ACP request/response IDs and session IDs keep concurrent sessions routed
+	// independently on the shared connection. Only the same Session is guarded
+	// above because loading it while its own turn is active could reset that
+	// turn's runtime state.
 	key := events.Key{UserID: row.UserID, ContainerID: row.ContainerID}
 	s.hub.Publish(key, events.Event{Type: "session.replay.started", SessionID: row.ID})
 	if _, ok := s.rpc(c, conn, "session/load", gin.H{"sessionId": row.RemoteID, "cwd": row.Cwd, "mcpServers": []any{}}); !ok {

@@ -972,7 +972,7 @@ The existing approval endpoint and approval events remain compatible. Web client
 should prefer interaction events and deduplicate legacy approval events by ID.
 Unrecognized upstream RPC requests remain unsupported; arbitrary RPC is not exposed.
 
-Session load during active work: reattaching the same loaded session returns 200
+Session load during active work: reattaching the same loaded session returns 200. Other sessions in the same container may load concurrently; request and session identifiers route their events independently.
 without replaying history. Loading another session while a container has an active
 turn returns 409 `ContainerBusy`; answer or stop that task first. Interaction
 responses and cancellation bypass ordinary per-user command serialization so an
