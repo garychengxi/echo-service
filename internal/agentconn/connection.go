@@ -194,6 +194,15 @@ func (c *Connection) readLoop() {
 		if e != nil {
 			return
 		}
+		// Gorilla handles Ping/Pong control frames through the configured
+		// handlers. They are transport keepalive, not ACP payloads, and must
+		// not tear down an otherwise healthy connection.
+		if kind == websocket.CloseMessage {
+			return
+		}
+		if kind == websocket.PingMessage || kind == websocket.PongMessage {
+			continue
+		}
 		if kind != websocket.TextMessage {
 			return
 		}
