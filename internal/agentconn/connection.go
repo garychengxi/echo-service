@@ -237,7 +237,7 @@ func (c *Connection) readLoop() {
 		}
 		// Unknown server requests fail closed. Permission requests are delivered to
 		// the owning application actor and must be replied to on this connection.
-		if len(b) > 1<<20 {
+		if int64(len(b)) > c.config.MaxMessageBytes {
 			return
 		}
 		// History replay arrives in bursts. Keep memory bounded and let the

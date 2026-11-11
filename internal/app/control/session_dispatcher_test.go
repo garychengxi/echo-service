@@ -42,3 +42,36 @@ func TestSessionDispatcherOrdersPerSessionWithoutCrossSessionBlocking(t *testing
 		t.Fatalf("session order lost: %v", got)
 	}
 }
+
+func TestSessionDispatcherContainsBacklogToOneSession(t *testing.T) {
+	type item struct{ session string }
+	blockA := make(chan struct{})
+	bDone := make(chan struct{})
+	d := newSessionDispatcher(1, func(event item) {
+		if event.session == "a" {
+			<-blockA
+		} else {
+			close(bDone)
+		}
+	})
+	if !d.Dispatch("a", item{session: "a"}) {
+		t.Fatal("first session a event rejected")
+	}
+	time.Sleep(10 * time.Millisecond)
+	if !d.Dispatch("a", item{session: "a"}) {
+		t.Fatal("session a queue was not available")
+	}
+	if d.Dispatch("a", item{session: "a"}) {
+		t.Fatal("overflowing session a queue was accepted")
+	}
+	if !d.Dispatch("b", item{session: "b"}) {
+		t.Fatal("session b was affected by session a backlog")
+	}
+	select {
+	case <-bDone:
+	case <-time.After(time.Second):
+		t.Fatal("session b was blocked by session a backlog")
+	}
+	close(blockA)
+	d.Close()
+}

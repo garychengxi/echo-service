@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const maxPayloadBytes = 8 << 20
+
 type Event struct {
 	Type        string `json:"type"`
 	EventID     string `json:"eventId"`
@@ -76,7 +78,7 @@ func (h *Hub) Publish(k Key, e Event) {
 	e.ContainerID = k.ContainerID
 	e.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
 	b, err := json.Marshal(e.Payload)
-	if err != nil || len(b) > 1<<20 {
+	if err != nil || len(b) > maxPayloadBytes {
 		for s := range h.subscribers[k] {
 			s.once.Do(func() { close(s.Done) })
 		}

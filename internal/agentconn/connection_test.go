@@ -248,3 +248,49 @@ func TestHistoryReplayWaitsForSlowConsumer(t *testing.T) {
 		t.Fatal("connection not reusable", err)
 	}
 }
+
+func TestConfiguredMessageLimitAcceptsLargeHistoryEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			var msg Message
+			if conn.ReadJSON(&msg) != nil {
+				return
+			}
+			if msg.Method == "session/load" {
+				params := mustJSON(map[string]string{"content": strings.Repeat("x", 2<<20)})
+				if conn.WriteJSON(Message{JSONRPC: "2.0", Method: "session/update", Params: params}) != nil {
+					return
+				}
+			}
+			if conn.WriteJSON(Message{JSONRPC: "2.0", ID: msg.ID, Result: json.RawMessage(`{}`)}) != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+	config := testConfig()
+	config.MaxMessageBytes = 4 << 20
+	conn, err := Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	result := make(chan error, 1)
+	go func() { _, err := conn.Call(context.Background(), "session/load", nil); result <- err }()
+	select {
+	case event := <-conn.Events():
+		if len(event.Params) < 2<<20 {
+			t.Fatal("large history event was truncated")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("large history event was not delivered")
+	}
+	if err := <-result; err != nil {
+		t.Fatal("large history event closed connection", err)
+	}
+}

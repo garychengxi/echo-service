@@ -725,6 +725,7 @@ streamId 改变表示服务实例事件流重建。当前不支持 afterSeq/repl
 | turn.cancelled | {state,stopReason} | 已确认取消 |
 | turn.unknown | {state,stopReason} | 结果不明，禁止自动重发 |
 | stream.reset | {reason:"upstreamDisconnected",requiresLoad:true} | 上游丢失；核对 turn 后恢复 |
+| session.reset | {reason:"backlogOverflow",requiresLoad:true} | 仅该 Session 积压；其他 Session 继续，使用前重新 load |
 
 session.update 示例：
 

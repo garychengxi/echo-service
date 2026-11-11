@@ -168,7 +168,15 @@ func (s *Service) readEvents(conn *agentconn.Connection, user, container string)
 				children[child] = session
 			}
 		}
-		dispatcher.Dispatch(session.ID, routedEvent{msg: msg, session: session, childSessionID: childSessionID})
+		if !dispatcher.Dispatch(session.ID, routedEvent{msg: msg, session: session, childSessionID: childSessionID}) {
+			if len(msg.ID) > 0 && isInteractionRequest(msg.Method) {
+				_ = conn.Reply(msg.ID, cancelledInteraction(msg.Method))
+			}
+			s.hub.Publish(events.Key{UserID: user, ContainerID: container}, events.Event{
+				Type: "session.reset", SessionID: session.ID,
+				Payload: gin.H{"reason": "backlogOverflow", "requiresLoad": true},
+			})
+		}
 	}
 }
 

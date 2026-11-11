@@ -36,8 +36,12 @@ func (d *sessionDispatcher[T]) Dispatch(sessionID string, item T) bool {
 		}(worker)
 	}
 	d.mu.Unlock()
-	worker <- item
-	return true
+	select {
+	case worker <- item:
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *sessionDispatcher[T]) Close() {
