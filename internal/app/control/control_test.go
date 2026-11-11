@@ -183,6 +183,14 @@ func fakeAgent(t *testing.T, withSubagents ...bool) (string, *atomic.Int32) {
 				reply(m.ID, gin.H{"mode": "always-ask", "base_url": "hidden", "oauth2": gin.H{"client_secret": "hidden"}})
 			case "session/prompt":
 				count.Add(1)
+				if strings.Contains(string(m.Params), "simulate-model-image-error") {
+					_ = conn.WriteJSON(agentconn.Message{JSONRPC: "2.0", ID: m.ID, Error: &agentconn.RPCError{Code: -32602, Message: "Invalid params", Data: json.RawMessage(`"provider secret: hidden-provider-key is not a multimodal model"`)}})
+					continue
+				}
+				if strings.Contains(string(m.Params), "simulate-model-error") {
+					_ = conn.WriteJSON(agentconn.Message{JSONRPC: "2.0", ID: m.ID, Error: &agentconn.RPCError{Code: -32603, Message: "provider secret", Data: json.RawMessage(`{"http_status":503,"message":"Bearer hidden-provider-key"}`)}})
+					continue
+				}
 				pending = m.ID
 				session = params["sessionId"].(string)
 				p, _ := json.Marshal(gin.H{"sessionId": session, "options": []any{gin.H{"optionId": "allow-once", "kind": "allow_once"}, gin.H{"optionId": "reject-once", "kind": "reject_once"}}, "toolCall": gin.H{"toolCallId": "tool-1", "title": "Read workspace"}})
@@ -240,6 +248,44 @@ func fakeAgent(t *testing.T, withSubagents ...bool) (string, *atomic.Int32) {
 	}))
 	t.Cleanup(server.Close)
 	return "ws" + strings.TrimPrefix(server.URL, "http"), count
+}
+
+func TestFailedTurnPreservesSafeDiagnosticsInEventsAndPolling(t *testing.T) {
+	endpoint, _ := fakeAgent(t)
+	f := setup(t)
+	id, _, token := f.assign(t, endpoint, "/workspace")
+	ticket := data(f.request(t, "POST", "/ws-tickets", token, gin.H{"containerId": id}, 200))["ticket"].(string)
+	socket, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(f.url, "http")+"/api/v1/events?ticket="+ticket, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer socket.Close()
+	readEvent(t, socket, "connection.ready")
+	session := data(f.request(t, "POST", "/containers/"+id+"/sessions", token, gin.H{"cwd": "/workspace"}, 201, "failure-session"))["id"].(string)
+	turn := data(f.request(t, "POST", "/sessions/"+session+"/turns", token, gin.H{"clientRequestId": "failure-turn", "content": []any{gin.H{"type": "text", "text": "simulate-model-error"}}}, 202))["id"].(string)
+	event := readEvent(t, socket, "turn.failed")
+	want := "Model service returned HTTP 503 (RPC -32603)."
+	if event["payload"].(map[string]any)["errorMessage"] != want {
+		t.Fatalf("missing event diagnostics: %#v", event)
+	}
+	row := data(f.request(t, "GET", "/turns/"+turn, token, nil, 200))
+	if row["state"] != "failed" || row["errorMessage"] != want {
+		t.Fatalf("missing stored diagnostics: %#v", row)
+	}
+	encoded, _ := json.Marshal([]any{row, event})
+	if strings.Contains(string(encoded), "hidden-provider-key") || strings.Contains(string(encoded), "provider secret") {
+		t.Fatal("provider credentials leaked")
+	}
+	imageTurn := data(f.request(t, "POST", "/sessions/"+session+"/turns", token, gin.H{"clientRequestId": "image-failure-turn", "content": []any{gin.H{"type": "text", "text": "simulate-model-image-error"}}}, 202))["id"].(string)
+	imageEvent := readEvent(t, socket, "turn.failed")
+	imageRow := data(f.request(t, "GET", "/turns/"+imageTurn, token, nil, 200))
+	if !strings.Contains(imageRow["errorMessage"].(string), "当前模型不支持图片") || imageEvent["payload"].(map[string]any)["errorMessage"] != imageRow["errorMessage"] {
+		t.Fatalf("missing image failure explanation: %#v", imageRow)
+	}
+	encoded, _ = json.Marshal([]any{imageRow, imageEvent})
+	if strings.Contains(string(encoded), "hidden-provider-key") || strings.Contains(string(encoded), "provider secret") {
+		t.Fatal("image provider credentials leaked")
+	}
 }
 
 func TestSubagentStreamRoutesOnlyAnnouncedChildrenOfOwnedParents(t *testing.T) {

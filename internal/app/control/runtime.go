@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"path"
@@ -734,11 +735,26 @@ func (s *Service) runTurn(conn *agentconn.Connection, session storage.Session, t
 	s.hub.Publish(key, events.Event{Type: "turn.started", SessionID: session.ID, TurnID: turn.ID})
 	result, e := conn.Call(s.ctx, "session/prompt", params)
 	state, reason := "completed", ""
+	errorMessage := ""
 	if e != nil {
 		state = "unknown"
+		errorMessage = "Agent connection interrupted; turn outcome is unknown."
 		var rpc *agentconn.RPCError
 		if errors.As(e, &rpc) {
 			state = "failed"
+			// Keep protocol diagnostics without exposing arbitrary provider bodies,
+			// which may contain credentials, prompt content or internal endpoints.
+			errorMessage = fmt.Sprintf("Agent request failed (RPC %d).", rpc.Code)
+			var details struct {
+				HTTPStatus int `json:"http_status"`
+			}
+			if json.Unmarshal(rpc.Data, &details) == nil && details.HTTPStatus >= 400 && details.HTTPStatus <= 599 {
+				errorMessage = fmt.Sprintf("Model service returned HTTP %d (RPC %d).", details.HTTPStatus, rpc.Code)
+			}
+			providerError := strings.ToLower(string(rpc.Data))
+			if strings.Contains(providerError, "not a multimodal model") {
+				errorMessage = "当前模型不支持图片，但请求中包含图片（可能来自会话历史中的 view_image）。请切换支持视觉的模型，或新建不含图片的会话。"
+			}
 		}
 	} else {
 		var body struct {
@@ -746,6 +762,7 @@ func (s *Service) runTurn(conn *agentconn.Connection, session storage.Session, t
 		}
 		if json.Unmarshal(result, &body) != nil {
 			state = "unknown"
+			errorMessage = "Agent returned an invalid turn response."
 		} else {
 			reason = body.StopReason
 			if reason == "cancelled" {
@@ -756,7 +773,7 @@ func (s *Service) runTurn(conn *agentconn.Connection, session storage.Session, t
 	// Cleanup is bounded and independent from a cancelled application context.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := s.Repo.DB.WithContext(ctx).Model(&turn).Updates(map[string]any{"state": state, "stop_reason": reason, "finished_at": time.Now().UnixMilli()}).Error; err != nil {
+	if err := s.Repo.DB.WithContext(ctx).Model(&turn).Updates(map[string]any{"state": state, "stop_reason": reason, "error_message": errorMessage, "finished_at": time.Now().UnixMilli()}).Error; err != nil {
 		state = "unknown"
 	}
 	s.runtimeMu.Lock()
@@ -768,7 +785,7 @@ func (s *Service) runTurn(conn *agentconn.Connection, session storage.Session, t
 		}
 	}
 	s.runtimeMu.Unlock()
-	s.hub.Publish(key, events.Event{Type: "turn." + state, SessionID: session.ID, TurnID: turn.ID, Payload: gin.H{"state": state, "stopReason": reason}})
+	s.hub.Publish(key, events.Event{Type: "turn." + state, SessionID: session.ID, TurnID: turn.ID, Payload: gin.H{"state": state, "stopReason": reason, "errorMessage": errorMessage}})
 }
 func (s *Service) getTurn(c *gin.Context) {
 	var t storage.Turn

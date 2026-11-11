@@ -167,6 +167,7 @@ export interface Turn {
   clientRequestId: string;
   state: TurnState;
   stopReason?: string;
+  errorMessage?: string; // 安全的协议诊断信息，不包含模型响应正文或凭据
   createdAt: number;
   finishedAt?: number; // 未完成时省略，不是 null
 }
@@ -721,7 +722,7 @@ streamId 改变表示服务实例事件流重建。当前不支持 afterSeq/repl
 | approval.resolved | {approvalId} | 关闭对应审批 |
 | turn.started | null | 正在执行 |
 | turn.completed | {state,stopReason} | 正常终态 |
-| turn.failed | {state,stopReason} | 失败终态 |
+| turn.failed | {state,stopReason,errorMessage?} | 失败终态；必须显示失败提示，不得按成功完成处理 |
 | turn.cancelled | {state,stopReason} | 已确认取消 |
 | turn.unknown | {state,stopReason} | 结果不明，禁止自动重发 |
 | stream.reset | {reason:"upstreamDisconnected",requiresLoad:true} | 上游丢失；核对 turn 后恢复 |

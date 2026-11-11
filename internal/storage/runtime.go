@@ -47,6 +47,7 @@ type Turn struct {
 	PayloadHash     string `json:"-"`
 	State           string `json:"state"`
 	StopReason      string `json:"stopReason,omitempty"`
+	ErrorMessage    string `json:"errorMessage,omitempty"`
 	CreatedAt       int64  `gorm:"autoCreateTime:milli" json:"createdAt"`
 	FinishedAt      *int64 `json:"finishedAt,omitempty"`
 }
@@ -97,6 +98,9 @@ func MigrateRuntime(db *gorm.DB) error {
 			return err
 		}
 		if err := tx.Exec("ALTER TABLE sessions ADD COLUMN mode_id TEXT NOT NULL DEFAULT 'always-ask'").Error; err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+		if err := tx.Exec("ALTER TABLE turns ADD COLUMN error_message TEXT NOT NULL DEFAULT ''").Error; err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return err
 		}
 		return nil
