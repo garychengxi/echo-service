@@ -240,11 +240,11 @@ func (c *Connection) readLoop() {
 		if len(b) > 1<<20 {
 			return
 		}
+		// History replay arrives in bursts. Keep memory bounded and let the
+		// consumer catch up instead of treating a full queue as disconnection.
 		select {
 		case c.events <- msg:
 		case <-c.done:
-			return
-		default:
 			return
 		}
 	}

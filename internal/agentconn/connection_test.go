@@ -179,3 +179,72 @@ func TestEndpointRestrictions(t *testing.T) {
 		}
 	}
 }
+
+// History replay can outpace database-backed event routing. A full bounded
+// queue must apply backpressure rather than destroy the shared ACP connection.
+func TestHistoryReplayWaitsForSlowConsumer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			var msg Message
+			if conn.ReadJSON(&msg) != nil {
+				return
+			}
+			if msg.Method == "session/load" {
+				for i := 0; i < 128; i++ {
+					if conn.WriteJSON(Message{JSONRPC: "2.0", Method: "session/update", Params: mustJSON(map[string]int{"index": i})}) != nil {
+						return
+					}
+				}
+			}
+			if conn.WriteJSON(Message{JSONRPC: "2.0", ID: msg.ID, Result: json.RawMessage(`{}`)}) != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+	conn, err := Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	result := make(chan error, 1)
+	go func() { _, err := conn.Call(context.Background(), "session/load", nil); result <- err }()
+	// Wait for replay to fill the queue before allowing the consumer to catch up.
+	deadline := time.After(time.Second)
+	for len(conn.events) < cap(conn.events) {
+		select {
+		case <-deadline:
+			t.Fatal("replay did not fill queue")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	time.Sleep(20 * time.Millisecond)
+	for i := 0; i < 128; i++ {
+		select {
+		case msg, ok := <-conn.Events():
+			if !ok {
+				t.Fatal("history burst closed connection")
+			}
+			var p struct {
+				Index int `json:"index"`
+			}
+			if json.Unmarshal(msg.Params, &p) != nil || p.Index != i {
+				t.Fatalf("event %d out of order: %s", i, msg.Params)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("history delivery stalled")
+		}
+	}
+	if err := <-result; err != nil {
+		t.Fatal("load failed", err)
+	}
+	if _, err := conn.Call(context.Background(), "session/set_mode", nil); err != nil {
+		t.Fatal("connection not reusable", err)
+	}
+}
