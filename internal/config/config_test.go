@@ -24,7 +24,7 @@ func TestDefaultsAndEnv(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if c.Database.MaxOpenConns != 1 || c.Cache.Provider != "memory" || c.Auth.AccessTokenTTL != 24*time.Hour || c.Auth.SingleSession || c.AgentConnection.MaxMessageBytes != 50<<20 {
+	if c.Database.MaxOpenConns != 1 || c.Cache.Provider != "memory" || c.Auth.AccessTokenTTL != 24*time.Hour || c.Auth.SingleSession || c.AgentConnection.MaxMessageBytes != 50<<20 || c.EventStream.SubscriberQueueSize != 256 {
 		t.Fatal("invalid defaults")
 	}
 	if !strings.Contains(c.Database.Path, "db.sqlite") {

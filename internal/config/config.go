@@ -16,6 +16,7 @@ type Config struct {
 	Cache           Cache
 	Auth            Auth
 	AgentConnection AgentConnection
+	EventStream     EventStream
 	ShutdownTimeout time.Duration
 }
 type Database struct {
@@ -40,11 +41,14 @@ type AgentConnection struct {
 	WriteQueueSize  int
 	MaxMessageBytes int64
 }
+type EventStream struct {
+	SubscriberQueueSize int
+}
 
 func Load(v *viper.Viper) (*Config, error) {
 	v.SetEnvPrefix("ECHO")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	for _, key := range []string{"HTTPServer.Listen", "DB.Path", "DB.BusyTimeout", "DB.MaxOpenConns", "Cache.Provider", "Cache.TTL", "Cache.CleanupInterval", "Auth.AccessTokenTTL", "Auth.RefreshTokenTTL", "Auth.Issuer", "Auth.SingleSession", "AgentConnection.DialTimeout", "AgentConnection.RequestTimeout", "AgentConnection.WriteQueueSize", "AgentConnection.MaxMessageBytes", "ShutdownTimeout"} {
+	for _, key := range []string{"HTTPServer.Listen", "DB.Path", "DB.BusyTimeout", "DB.MaxOpenConns", "Cache.Provider", "Cache.TTL", "Cache.CleanupInterval", "Auth.AccessTokenTTL", "Auth.RefreshTokenTTL", "Auth.Issuer", "Auth.SingleSession", "AgentConnection.DialTimeout", "AgentConnection.RequestTimeout", "AgentConnection.WriteQueueSize", "AgentConnection.MaxMessageBytes", "EventStream.SubscriberQueueSize", "ShutdownTimeout"} {
 		if err := v.BindEnv(key); err != nil {
 			return nil, err
 		}
@@ -66,6 +70,7 @@ func Load(v *viper.Viper) (*Config, error) {
 	}
 	c.AgentConnection.WriteQueueSize = integer(v, "AgentConnection.WriteQueueSize", 256)
 	c.AgentConnection.MaxMessageBytes = int64(integer(v, "AgentConnection.MaxMessageBytes", 50<<20))
+	c.EventStream.SubscriberQueueSize = integer(v, "EventStream.SubscriberQueueSize", 256)
 	for _, item := range []struct {
 		key, fallback string
 		target        *time.Duration
@@ -122,7 +127,7 @@ func (c *Config) Validate() error {
 	if c.Auth.AccessTokenTTL <= 0 || c.Auth.RefreshTokenTTL <= c.Auth.AccessTokenTTL || c.Auth.Issuer == "" {
 		return fmt.Errorf("invalid auth configuration")
 	}
-	if c.AgentConnection.DialTimeout <= 0 || c.AgentConnection.RequestTimeout <= 0 || c.AgentConnection.WriteQueueSize < 1 || c.AgentConnection.MaxMessageBytes < 1024 {
+	if c.AgentConnection.DialTimeout <= 0 || c.AgentConnection.RequestTimeout <= 0 || c.AgentConnection.WriteQueueSize < 1 || c.AgentConnection.MaxMessageBytes < 1024 || c.EventStream.SubscriberQueueSize < 1 || c.EventStream.SubscriberQueueSize > 4096 {
 		return fmt.Errorf("invalid agent connection limits")
 	}
 	return nil

@@ -31,12 +31,17 @@ ECHO_AUTH_SINGLESESSION=false
 ECHO_AUTH_ACCESSTOKENTTL=24h
 ECHO_AUTH_REFRESHTOKENTTL=168h
 ECHO_AGENTCONNECTION_MAXMESSAGEBYTES=52428800
+ECHO_EVENTSTREAM_SUBSCRIBERQUEUESIZE=256
 ```
 
 `ECHO_AGENTCONNECTION_MAXMESSAGEBYTES` is the maximum size of one ACP/WebSocket
 message in bytes. The default `52428800` is 50 MiB. It is not a Session history
 cache size; it applies to each individual Agent event and the corresponding Web
 event broadcast.
+
+`ECHO_EVENTSTREAM_SUBSCRIBERQUEUESIZE` controls the bounded event queue for
+each connected browser. A slow browser is disconnected only when its own queue
+fills; reconnecting the browser event stream does not reload Session history.
 
 Independent logins coexist by default. Set `ECHO_AUTH_SINGLESESSION=true` to
 revoke older logins on successful login. Refresh and single-device logout affect

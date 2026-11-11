@@ -3,7 +3,7 @@ package events
 import "testing"
 
 func TestIsolationSlowConsumerAndClose(t *testing.T) {
-	h := New(50 << 20)
+	h := New(50<<20, 16)
 	k := Key{"user", "container"}
 	slow := h.Subscribe(k)
 	fast := h.Subscribe(k)

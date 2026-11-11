@@ -31,16 +31,20 @@ type Hub struct {
 	seq         uint64
 	stream      string
 	maxPayload  int64
+	queueSize   int
 	closed      bool
 }
 
-func New(maxPayload int64) *Hub {
-	return &Hub{subscribers: make(map[Key]map[*Subscription]struct{}), stream: uuid.NewString(), maxPayload: maxPayload}
+func New(maxPayload int64, queueSize int) *Hub {
+	if queueSize < 1 {
+		queueSize = 16
+	}
+	return &Hub{subscribers: make(map[Key]map[*Subscription]struct{}), stream: uuid.NewString(), maxPayload: maxPayload, queueSize: queueSize}
 }
 func (h *Hub) Subscribe(k Key) *Subscription {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	s := &Subscription{Events: make(chan Event, 16), Done: make(chan struct{})}
+	s := &Subscription{Events: make(chan Event, h.queueSize), Done: make(chan struct{})}
 	if h.closed {
 		s.once.Do(func() { close(s.Done) })
 		return s
