@@ -1003,6 +1003,11 @@ func (s *Service) eventSocket(c *gin.Context) {
 		if origin == "" {
 			return true
 		}
+		for _, allowed := range strings.Split(s.allowedOrigins, ",") {
+			if strings.TrimSpace(allowed) != "" && origin == strings.TrimSpace(allowed) {
+				return true
+			}
+		}
 		u, e := url.Parse(origin)
 		scheme := "http"
 		if r.TLS != nil {

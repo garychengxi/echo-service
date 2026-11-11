@@ -85,3 +85,11 @@ make cross-build
 代理、进程级用户隔离、指标与多实例连接路由。文章中 ring buffer/sharded broadcast 的方向可用于
 未来大规模广播，但本实现先采用有界 channel、慢消费者断开和按用户/容器隔离，保持行为可验证。
 
+# HTTPS event gateways
+
+When TLS terminates at a reverse proxy, set `ECHO_EVENTSTREAM_ALLOWEDORIGINS`
+to the exact browser origins, separated by commas (for example
+`https://echo.example.com:5443`). The default retains direct same-origin checks.
+Forward the original `Host` including its port using Nginx `$http_host`.
+Forwarded scheme headers alone do not bypass Origin checks.
+

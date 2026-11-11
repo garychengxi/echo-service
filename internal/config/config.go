@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/spf13/viper"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +44,7 @@ type AgentConnection struct {
 }
 type EventStream struct {
 	SubscriberQueueSize int
+	AllowedOrigins      string
 }
 
 func Load(v *viper.Viper) (*Config, error) {
@@ -54,6 +56,9 @@ func Load(v *viper.Viper) (*Config, error) {
 		}
 	}
 	c := &Config{}
+	if err := v.BindEnv("EventStream.AllowedOrigins"); err != nil {
+		return nil, err
+	}
 	if err := v.Unmarshal(&c.Server); err != nil {
 		return nil, fmt.Errorf("cannot decode server config")
 	}
@@ -71,6 +76,7 @@ func Load(v *viper.Viper) (*Config, error) {
 	c.AgentConnection.WriteQueueSize = integer(v, "AgentConnection.WriteQueueSize", 256)
 	c.AgentConnection.MaxMessageBytes = int64(integer(v, "AgentConnection.MaxMessageBytes", 50<<20))
 	c.EventStream.SubscriberQueueSize = integer(v, "EventStream.SubscriberQueueSize", 256)
+	c.EventStream.AllowedOrigins = v.GetString("EventStream.AllowedOrigins")
 	for _, item := range []struct {
 		key, fallback string
 		target        *time.Duration
@@ -92,6 +98,16 @@ func Load(v *viper.Viper) (*Config, error) {
 	return c, nil
 }
 func (c *Config) Validate() error {
+	for _, origin := range strings.Split(c.EventStream.AllowedOrigins, ",") {
+		origin = strings.TrimSpace(origin)
+		if origin == "" {
+			continue
+		}
+		u, err := url.Parse(origin)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("EventStream.AllowedOrigins must contain comma-separated HTTP(S) origins without paths")
+		}
+	}
 	if c.Server.AppName == "" || c.Server.AppCode <= 0 {
 		return fmt.Errorf("AppName and positive AppCode are required")
 	}

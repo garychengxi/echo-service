@@ -142,6 +142,32 @@ func TestAuthIsolationAndCacheInvalidation(t *testing.T) {
 	f.request(t, "POST", "/auth/login", "", gin.H{"username": "alice", "password": "alice-test-password"}, 401)
 }
 
+func TestEventSocketExplicitProxyOrigin(t *testing.T) {
+	f := setup(t)
+	f.s.allowedOrigins = "https://example.test:5443"
+	id, _, token := f.assign(t, "ws://127.0.0.1:4600", "/workspace")
+	for _, origin := range []string{"https://example.test:5443", "https://example.test", "https://evil.test:5443"} {
+		ticket := data(f.request(t, "POST", "/ws-tickets", token, gin.H{"containerId": id}, 200))["ticket"].(string)
+		socket, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(f.url, "http")+"/api/v1/events?ticket="+ticket, http.Header{"Origin": []string{origin}, "X-Forwarded-Proto": []string{"https"}})
+		if origin == "https://example.test:5443" {
+			if err != nil {
+				t.Fatal(err)
+			}
+			readEvent(t, socket, "connection.ready")
+			socket.Close()
+		} else {
+			if err == nil {
+				socket.Close()
+				t.Fatalf("accepted invalid origin %s", origin)
+			}
+			if response == nil || response.StatusCode != 403 {
+				t.Fatalf("wrong denial for %s: %v", origin, response)
+			}
+			response.Body.Close()
+		}
+	}
+}
+
 func fakeAgent(t *testing.T, withSubagents ...bool) (string, *atomic.Int32) {
 	t.Helper()
 	count := &atomic.Int32{}

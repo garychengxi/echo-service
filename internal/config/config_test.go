@@ -32,6 +32,20 @@ func TestDefaultsAndEnv(t *testing.T) {
 	}
 }
 
+func TestEventStreamOrigins(t *testing.T) {
+	t.Setenv("ECHO_EVENTSTREAM_ALLOWEDORIGINS", "https://example.test:5443,http://localhost:5180")
+	c, err := load(t, "")
+	if err != nil || c.EventStream.AllowedOrigins != "https://example.test:5443,http://localhost:5180" {
+		t.Fatalf("origin config: %#v %v", c, err)
+	}
+	for _, invalid := range []string{"*", "https://example.test/path", "https://user:secret@example.test", "javascript:alert(1)"} {
+		t.Setenv("ECHO_EVENTSTREAM_ALLOWEDORIGINS", invalid)
+		if _, err := load(t, ""); err == nil {
+			t.Fatalf("accepted %q", invalid)
+		}
+	}
+}
+
 func TestAgentMessageLimitEnvironmentOverride(t *testing.T) {
 	t.Setenv("ECHO_AGENTCONNECTION_MAXMESSAGEBYTES", "67108864")
 	c, err := load(t, "[AgentConnection]\nMaxMessageBytes=1048576")
