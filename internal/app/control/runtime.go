@@ -104,7 +104,17 @@ func (s *Service) readEvents(conn *agentconn.Connection, user, container string)
 	// database sessions. Only route children announced by an owned parent on
 	// this connection; discard these mappings when the connection closes.
 	children := make(map[string]storage.Session)
+	sessions := make(map[string]storage.Session)
+	type routedEvent struct {
+		msg            agentconn.Message
+		session        storage.Session
+		childSessionID string
+	}
+	dispatcher := newSessionDispatcher(256, func(item routedEvent) {
+		s.processAgentEvent(conn, item.msg, item.session, item.childSessionID, user, container)
+	})
 	defer func() {
+		dispatcher.Close()
 		s.runtimeMu.Lock()
 		delete(s.attached, conn)
 		for id, c := range s.loaded {
@@ -133,7 +143,15 @@ func (s *Service) readEvents(conn *agentconn.Connection, user, container string)
 		remote, _ := params["sessionId"].(string)
 		var session storage.Session
 		childSessionID := ""
-		if e := s.Repo.DB.WithContext(s.ctx).First(&session, "remote_id=? AND container_id=? AND user_id=?", remote, container, user).Error; e != nil {
+		var known bool
+		if session, known = sessions[remote]; !known {
+			e := s.Repo.DB.WithContext(s.ctx).First(&session, "remote_id=? AND container_id=? AND user_id=?", remote, container, user).Error
+			if e == nil {
+				sessions[remote] = session
+				known = true
+			}
+		}
+		if !known {
 			parent, known := children[remote]
 			if known && (msg.Method == "session/update" || isInteractionRequest(msg.Method)) {
 				session = parent
@@ -145,31 +163,45 @@ func (s *Service) readEvents(conn *agentconn.Connection, user, container string)
 				continue
 			}
 		}
-		var turn storage.Turn
-		requestID := ""
-		if meta, ok := params["_meta"].(map[string]any); ok {
-			requestID, _ = meta["request_id"].(string)
-		}
-		if requestID != "" {
-			_ = s.Repo.DB.WithContext(s.ctx).First(&turn, "id=? AND session_id=?", requestID, session.ID).Error
-		} else {
-			_ = s.Repo.DB.WithContext(s.ctx).Where("session_id=? AND state IN ?", session.ID, []string{"running", "awaiting_approval", "cancelling"}).First(&turn).Error
-		}
-		if isInteractionRequest(msg.Method) && len(msg.ID) > 0 {
-			s.requestInteraction(conn, msg, params, session, turn, user, container)
-		} else if msg.Method == "session/update" || msg.Method == "_codeflow/session_notification" || strings.HasPrefix(msg.Method, "codeflow/") || strings.HasPrefix(msg.Method, "x.ai/") {
-			if update, ok := params["update"].(map[string]any); ok && update["sessionUpdate"] == "subagent_spawned" {
-				if child, ok := update["child_session_id"].(string); ok && child != "" && len(children) < 4096 {
-					children[child] = session
-				}
+		if update, ok := params["update"].(map[string]any); ok && update["sessionUpdate"] == "subagent_spawned" {
+			if child, ok := update["child_session_id"].(string); ok && child != "" && len(children) < 4096 {
+				children[child] = session
 			}
-			delete(params, "sessionId")
-			if childSessionID != "" {
-				params["childSessionId"] = childSessionID
-			}
-			s.hub.Publish(events.Key{UserID: user, ContainerID: container}, events.Event{Type: "session.update", SessionID: session.ID, TurnID: turn.ID, Payload: redact(params)})
 		}
+		dispatcher.Dispatch(session.ID, routedEvent{msg: msg, session: session, childSessionID: childSessionID})
 	}
+}
+
+// processAgentEvent serializes updates within one Session. readEvents routes
+// separate Sessions to independent workers so a slow history replay or
+// interaction cannot stall unrelated conversations on the same Agent socket.
+func (s *Service) processAgentEvent(conn *agentconn.Connection, msg agentconn.Message, session storage.Session, childSessionID, user, container string) {
+	var params map[string]any
+	if json.Unmarshal(msg.Params, &params) != nil {
+		return
+	}
+	var turn storage.Turn
+	requestID := ""
+	if meta, ok := params["_meta"].(map[string]any); ok {
+		requestID, _ = meta["request_id"].(string)
+	}
+	if requestID != "" {
+		_ = s.Repo.DB.WithContext(s.ctx).First(&turn, "id=? AND session_id=?", requestID, session.ID).Error
+	} else {
+		_ = s.Repo.DB.WithContext(s.ctx).Where("session_id=? AND state IN ?", session.ID, []string{"running", "awaiting_approval", "cancelling"}).First(&turn).Error
+	}
+	if isInteractionRequest(msg.Method) && len(msg.ID) > 0 {
+		s.requestInteraction(conn, msg, params, session, turn, user, container)
+		return
+	}
+	if msg.Method != "session/update" && msg.Method != "_codeflow/session_notification" && !strings.HasPrefix(msg.Method, "codeflow/") && !strings.HasPrefix(msg.Method, "x.ai/") {
+		return
+	}
+	delete(params, "sessionId")
+	if childSessionID != "" {
+		params["childSessionId"] = childSessionID
+	}
+	s.hub.Publish(events.Key{UserID: user, ContainerID: container}, events.Event{Type: "session.update", SessionID: session.ID, TurnID: turn.ID, Payload: redact(params)})
 }
 
 // reconnectAgent keeps the container ACP lifecycle alive after a transport
