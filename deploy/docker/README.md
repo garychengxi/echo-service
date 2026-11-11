@@ -30,7 +30,13 @@ Authentication defaults in `.env`:
 ECHO_AUTH_SINGLESESSION=false
 ECHO_AUTH_ACCESSTOKENTTL=24h
 ECHO_AUTH_REFRESHTOKENTTL=168h
+ECHO_AGENTCONNECTION_MAXMESSAGEBYTES=52428800
 ```
+
+`ECHO_AGENTCONNECTION_MAXMESSAGEBYTES` is the maximum size of one ACP/WebSocket
+message in bytes. The default `52428800` is 50 MiB. It is not a Session history
+cache size; it applies to each individual Agent event and the corresponding Web
+event broadcast.
 
 Independent logins coexist by default. Set `ECHO_AUTH_SINGLESESSION=true` to
 revoke older logins on successful login. Refresh and single-device logout affect

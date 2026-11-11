@@ -38,4 +38,4 @@ SingleSession = false
 DialTimeout = "5s"
 RequestTimeout = "30s"
 WriteQueueSize = 256
-MaxMessageBytes = 8388608
+MaxMessageBytes = 52428800

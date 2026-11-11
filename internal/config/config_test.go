@@ -24,11 +24,22 @@ func TestDefaultsAndEnv(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if c.Database.MaxOpenConns != 1 || c.Cache.Provider != "memory" || c.Auth.AccessTokenTTL != 24*time.Hour || c.Auth.SingleSession {
+	if c.Database.MaxOpenConns != 1 || c.Cache.Provider != "memory" || c.Auth.AccessTokenTTL != 24*time.Hour || c.Auth.SingleSession || c.AgentConnection.MaxMessageBytes != 50<<20 {
 		t.Fatal("invalid defaults")
 	}
 	if !strings.Contains(c.Database.Path, "db.sqlite") {
 		t.Fatal("env override ignored")
+	}
+}
+
+func TestAgentMessageLimitEnvironmentOverride(t *testing.T) {
+	t.Setenv("ECHO_AGENTCONNECTION_MAXMESSAGEBYTES", "67108864")
+	c, err := load(t, "[AgentConnection]\nMaxMessageBytes=1048576")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.AgentConnection.MaxMessageBytes != 64<<20 {
+		t.Fatal("agent message limit environment ignored")
 	}
 }
 func TestInvalid(t *testing.T) {

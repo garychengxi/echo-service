@@ -8,8 +8,6 @@ import (
 	"time"
 )
 
-const maxPayloadBytes = 8 << 20
-
 type Event struct {
 	Type        string `json:"type"`
 	EventID     string `json:"eventId"`
@@ -32,11 +30,12 @@ type Hub struct {
 	subscribers map[Key]map[*Subscription]struct{}
 	seq         uint64
 	stream      string
+	maxPayload  int64
 	closed      bool
 }
 
-func New() *Hub {
-	return &Hub{subscribers: make(map[Key]map[*Subscription]struct{}), stream: uuid.NewString()}
+func New(maxPayload int64) *Hub {
+	return &Hub{subscribers: make(map[Key]map[*Subscription]struct{}), stream: uuid.NewString(), maxPayload: maxPayload}
 }
 func (h *Hub) Subscribe(k Key) *Subscription {
 	h.mu.Lock()
@@ -78,7 +77,7 @@ func (h *Hub) Publish(k Key, e Event) {
 	e.ContainerID = k.ContainerID
 	e.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
 	b, err := json.Marshal(e.Payload)
-	if err != nil || len(b) > maxPayloadBytes {
+	if err != nil || int64(len(b)) > h.maxPayload {
 		for s := range h.subscribers[k] {
 			s.once.Do(func() { close(s.Done) })
 		}

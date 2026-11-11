@@ -65,7 +65,7 @@ func Load(v *viper.Viper) (*Config, error) {
 		c.Auth.SingleSession = single
 	}
 	c.AgentConnection.WriteQueueSize = integer(v, "AgentConnection.WriteQueueSize", 256)
-	c.AgentConnection.MaxMessageBytes = int64(integer(v, "AgentConnection.MaxMessageBytes", 8<<20))
+	c.AgentConnection.MaxMessageBytes = int64(integer(v, "AgentConnection.MaxMessageBytes", 50<<20))
 	for _, item := range []struct {
 		key, fallback string
 		target        *time.Duration

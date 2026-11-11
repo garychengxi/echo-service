@@ -60,7 +60,7 @@ func New(db *gorm.DB, c *config.Config) (*Service, error) {
 	memory := cache.NewMemory(c.Cache.CleanupInterval)
 	repo := &storage.SQL{DB: db}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Service{Repo: repo, Directory: directory.New(repo, memory, c.Cache.TTL), Auth: auth.New(db, c.Auth), Connections: agentconn.NewManager(c.AgentConnection), connectionConfig: c.AgentConnection, cache: memory, limiter: &limiter{entries: make(map[string]limitEntry)}, hashSlots: make(chan struct{}, 4), attached: make(map[*agentconn.Connection]bool), loaded: make(map[string]*agentconn.Connection), approvals: make(map[string]*approval), tickets: make(map[string]ticket), hub: events.New(), ctx: ctx, cancel: cancel}, nil
+	return &Service{Repo: repo, Directory: directory.New(repo, memory, c.Cache.TTL), Auth: auth.New(db, c.Auth), Connections: agentconn.NewManager(c.AgentConnection), connectionConfig: c.AgentConnection, cache: memory, limiter: &limiter{entries: make(map[string]limitEntry)}, hashSlots: make(chan struct{}, 4), attached: make(map[*agentconn.Connection]bool), loaded: make(map[string]*agentconn.Connection), approvals: make(map[string]*approval), tickets: make(map[string]ticket), hub: events.New(c.AgentConnection.MaxMessageBytes), ctx: ctx, cancel: cancel}, nil
 }
 func (s *Service) ConnectionsConfig() config.AgentConnection { return s.connectionConfig }
 func (s *Service) invalidate(user, container string) {
