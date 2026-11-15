@@ -13,8 +13,18 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 MAX_FILE_BYTES = 1_000_000
 
 
+def parse_url(value):
+    try:
+        parsed = urlsplit(value)
+        # Properties are lazy: validate them inside this credential-safe boundary.
+        _ = parsed.hostname, parsed.username, parsed.password, parsed.port
+        return parsed
+    except (TypeError, ValueError, UnicodeError):
+        raise ValueError("invalid URL authority or port") from None
+
+
 def validate_service_url(value):
-    parsed = urlsplit(value)
+    parsed = parse_url(value)
     try:
         loopback = ipaddress.ip_address(parsed.hostname or "").is_loopback
     except ValueError:
@@ -88,7 +98,10 @@ def valid_mcp(config):
     elif transport in ("http", "sse"):
         if not isinstance(config.get("url"), str):
             return False
-        url = urlsplit(config["url"])
+        try:
+            url = parse_url(config["url"])
+        except ValueError:
+            return False
         if url.scheme not in ("http", "https") or not url.hostname or url.username is not None:
             return False
     else:
@@ -106,7 +119,7 @@ def load_mcp(path):
     if not isinstance(value, dict) or set(value) != {"mcpServers"} or not isinstance(value["mcpServers"], dict):
         raise ValueError("MCP input must contain only a mcpServers object")
     for key, config in value["mcpServers"].items():
-        if (not key or len(key.encode("utf-8")) > 200 or key != key.strip()
+        if (not key or key in (".", "..") or len(key.encode("utf-8")) > 200 or key != key.strip()
                 or any(char in key for char in "/\\\x00\r\n") or not valid_mcp(config)):
             raise ValueError("invalid MCP key or configuration")
     return value["mcpServers"]

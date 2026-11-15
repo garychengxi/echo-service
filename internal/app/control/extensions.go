@@ -354,7 +354,7 @@ func (s *Service) saveMcpServer(c *gin.Context, conn *agentconn.Connection) {
 		key = k
 		config = v
 	}
-	if !validMcpKey(key) || !validMcpConfig(config) {
+	if !validMcpKey(key) || key == "." || key == ".." || !validMcpConfig(config) {
 		lib.Error(c, 422, "ValidationFailed", "Invalid MCP configuration")
 		return
 	}

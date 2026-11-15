@@ -21,7 +21,7 @@ class SyncTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.calls = []
         self.skills = {}
-        self.fail = False
+        self.fail_mutation = False
         self.redirect = False
         owner = self
 
@@ -47,7 +47,7 @@ class SyncTests(unittest.TestCase):
             def mutate(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 owner.calls.append((self.command, self.path, body, self.headers.get("Authorization")))
-                if owner.fail:
+                if owner.fail_mutation:
                     self.respond({"secret": "do-not-print-me"}, 502)
                     return
                 if self.path.endswith("/skills"):
@@ -113,7 +113,7 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_partial_failure_stops_and_does_not_print_response_or_retry(self):
-        self.fail = True
+        self.fail_mutation = True
         result, _, err = self.run_cli("--apply")
         self.assertEqual(result, 1)
         self.assertIn("reconcile", err)
@@ -132,6 +132,40 @@ class SyncTests(unittest.TestCase):
             [{"name": "ok", "description": "d", "instruction": "i", "scope": "enterprise"}],
         ]:
             self.write("skills.json", content)
+            self.assertEqual(self.run_cli("--apply")[0], 1)
+        self.assertEqual(self.calls, [])
+
+
+    def test_malformed_authorities_never_expose_credentials(self):
+        secret = "sentinel-secret"
+        for url in [
+            "https://alice:" + secret + "@host：443/api/v1",
+            "https://alice:" + secret + "@[broken/api/v1",
+        ]:
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                result = sync_config.main(["--service-url", url, "--container-id", "one", "--skills", self.skills_file])
+            self.assertEqual(result, 1)
+            self.assertNotIn(secret, out.getvalue() + err.getvalue())
+        for url in [
+            "https://alice:" + secret + "@host：443/mcp",
+            "https://alice:" + secret + "@[broken/mcp",
+        ]:
+            self.write("mcp.json", {"mcpServers": {"demo": {"url": url}}})
+            out, err = io.StringIO(), io.StringIO()
+            with patch.dict(os.environ, {"ECHO_SERVICE_ACCESS_TOKEN": "test-only"}), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                result = sync_config.main(["--service-url", self.base, "--container-id", "one", "--skills", self.skills_file, "--mcp", self.mcp_file, "--apply"])
+            self.assertEqual(result, 1)
+            self.assertNotIn(secret, out.getvalue() + err.getvalue())
+        self.assertEqual(self.calls, [])
+
+    def test_invalid_ports_and_dot_keys_fail_before_any_request(self):
+        for url in ["https://host.invalid:bad/mcp", "https://host.invalid:70000/mcp"]:
+            self.write("mcp.json", {"mcpServers": {"demo": {"url": url}}})
+            self.assertEqual(self.run_cli()[0], 1)
+            self.assertEqual(self.run_cli("--apply")[0], 1)
+        for key in [".", ".."]:
+            self.write("mcp.json", {"mcpServers": {key: {"command": "run"}}})
             self.assertEqual(self.run_cli("--apply")[0], 1)
         self.assertEqual(self.calls, [])
 

@@ -221,6 +221,7 @@ func TestExtensionMcpValidationAndUnsupported(t *testing.T) {
 		`{}`, `{"mcpServers":{}}`, `{"mcpServers":{"a":{"command":"a"},"b":{"command":"b"}}}`,
 		`{"mcpServers":{"a":{"url":"file:///etc/passwd"}}}`, `{"mcpServers":{"a":{"command":""}}}`,
 		`{"mcpServers":{"a":{"command":"run","args":[1]}}}`,
+		`{"mcpServers":{".":{"command":"run"}}}`, `{"mcpServers":{"..":{"command":"run"}}}`,
 	} {
 		f.request(t, "POST", base, token, gin.H{"config": config}, 422)
 	}
@@ -228,6 +229,10 @@ func TestExtensionMcpValidationAndUnsupported(t *testing.T) {
 	if a.mutations() != 0 {
 		t.Fatal("invalid MCP mutated runtime")
 	}
+	a.mu.Lock()
+	a.servers["."] = gin.H{"key": ".", "source": "user", "raw_config": gin.H{"command": "legacy"}, "enabled": false, "functions": []gin.H{}}
+	a.mu.Unlock()
+	f.request(t, "GET", base, token, nil, 200)
 	a.mu.Lock()
 	a.servers["unsupported"] = gin.H{"key": "unsupported", "source": "user", "raw_config": gin.H{"command": "run"}, "enabled": true, "functions": []gin.H{}}
 	a.mu.Unlock()
