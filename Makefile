@@ -28,7 +28,10 @@ test-race:
 test-echo:
 	@test -n "$(ECHO_TEST_BINARY)" || (echo 'set ECHO_TEST_BINARY=/absolute/path/to/echo'; exit 1)
 	ECHO_TEST_BINARY=$(ECHO_TEST_BINARY) $(GO) test ./internal/app/control -run TestRealEchoServer -count=1
-check: fmt-check typecheck vet test
+check: fmt-check typecheck vet test test-config-sync
+.PHONY: test-config-sync
+test-config-sync:
+	python3 -m unittest discover -s scripts -p 'test_sync_agent_config.py'
 compile: build
 build:
 	mkdir -p $(OUTDIR)/bin

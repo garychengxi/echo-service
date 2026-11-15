@@ -58,6 +58,48 @@ CLI 创建，没有默认密码。容器通过 admin API 登记为 `ws://private
 
 `/livez` 与 `/healthz` 只反映进程存活，`/readyz` 会实际检查 SQLite。
 
+## Skill / MCP 配置同步
+
+用户技能 CRUD 与 MCP 管理合同见 [Agent 扩展管理](doc/agent-extensions.md)。
+`scripts/sync-agent-config.py` 仅依赖 Python 3.10+ 标准库，可在宿主机或容器里运行；目标始终是明确指定的 Service 容器，不读写运行脚本机器的 Echo home。
+
+`skills.json` 示例：
+
+```json
+[{"name":"review","description":"Review code","instruction":"Inspect changes and tests."}]
+```
+
+`mcp.json` 示例：
+
+```json
+{"mcpServers":{"local-files":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/workspace"]}}}
+```
+
+先离线检查（默认 dry-run，无网络请求）：
+
+```sh
+python3 scripts/sync-agent-config.py --service-url https://echo.example/api/v1 --container-id CONTAINER_ID --skills skills.json --mcp mcp.json
+```
+
+确认目标后应用。access token 由现有登录流程获取，通过环境变量传入，勿写入命令参数、文件或日志：
+
+```sh
+# 在当前 shell 安全设置 ECHO_SERVICE_ACCESS_TOKEN 后执行：
+python3 scripts/sync-agent-config.py --service-url https://echo.example/api/v1 --container-id CONTAINER_ID --skills skills.json --mcp mcp.json --apply
+```
+
+同样的命令可在现有 Python 容器内执行，或把脚本与输入文件只读挂载到独立容器：
+
+```sh
+docker run --rm -e ECHO_SERVICE_ACCESS_TOKEN -v "$PWD:/work:ro" -w /work python:3.12-alpine python scripts/sync-agent-config.py --service-url https://echo.example/api/v1 --container-id CONTAINER_ID --skills skills.json --mcp mcp.json --apply
+```
+
+只执行增量创建/更新，不删除未声明资源，不复制账号、会话、插件资产或桌面全局配置。
+已有用户技能按名称更新；MCP 逐个保存并遵循隐藏凭据保留规则。
+失败即停止，退出码非零；已成功的更改不会回滚，网络超时的结果可能未知，应核对目录后再执行。脚本不自动重试修改请求或跟随重定向。
+生产 URL 必须 HTTPS；仅 loopback 允许 HTTP，容器内的 loopback 指容器自身而非宿主机。
+输入需可信：MCP command 由目标 Agent 执行，脚本不会搬运可执行文件或确保目标镜像安装了其依赖。
+
 ## 缓存与 Redis 迁移
 
 `internal/cache.Store` 只缓存无密码 hash 的用户和容器元数据，授权、token 和用户容器关系
