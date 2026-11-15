@@ -78,7 +78,7 @@ func (s *Service) registerRuntime(api *gin.RouterGroup, secured *gin.RouterGroup
 	secured.GET("/containers/:containerId/file-content", s.readFile)
 	secured.GET("/containers/:containerId/agent-settings", s.agentSettings)
 	secured.PATCH("/containers/:containerId/agent-settings", s.agentSettings)
-	secured.GET("/containers/:containerId/mcp-servers", s.agentRead("_list_mcp", nil))
+	s.registerExtensions(secured)
 }
 
 func (s *Service) connection(ctx context.Context, p auth.Principal, container string) (*agentconn.Connection, error) {

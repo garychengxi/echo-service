@@ -445,6 +445,8 @@ backoff 到期后下一次显式业务请求才尝试拨号，没有后台自动
 
 仅目录技能；插件技能不合并进这个列表。返回 source 是展示信息，不是本服务文件正文接口。
 
+用户级创建、编辑和删除接口已提供，完整合同与错误语义见 [Agent 扩展管理](agent-extensions.md)。项目级和组织级仍为只读。
+
 ### 5.5 GET /containers/{containerId}/plugins
 
 无 query/body。成功 200：`{status:"success",plugins:InstalledPlugin[]}`。
@@ -456,10 +458,10 @@ runtimeReason（可 null）、skills/mcp。额外兼容字段按可选项处理�
 
 ### 5.6 GET /containers/{containerId}/mcp-servers
 
-成功 200：`{status:"success"|"error",mcpServers:Record<string,unknown>}`。
-空示例 `{"status":"success","mcpServers":{}}`。
-status=error 可能仍是 HTTP 200，表示目录中存在启用但探测异常的 MCP。
-env/headers/凭据字段会移除；首版仅展示，不提供 MCP 配置编辑。
+成功 200：`{mcpServers:Record<string,McpEntry>}`；空目录为 `{"mcpServers":{}}`。
+每项含 key/source/enabled/status/functions 和仅有 transport 提示的 config/raw_config。
+配置值和原始诊断不回传，避免命令参数或 URL 中的凭据泄露。连接失败可为 HTTP 200，需检查条目 status。
+保存、删除、启停及连接测试见 [Agent 扩展管理](agent-extensions.md)，其中说明了编辑时保留隐藏凭据的规则。
 
 ### 5.7 GET /containers/{containerId}/environment
 
